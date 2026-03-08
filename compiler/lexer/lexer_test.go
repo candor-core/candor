@@ -103,6 +103,7 @@ func TestAllKeywords(t *testing.T) {
 		{"assert", TokAssert},
 		{"module", TokModule},
 		{"use", TokUse},
+		{"mut", TokMut},
 	}
 	for _, c := range cases {
 		t.Run(c.src, func(t *testing.T) {

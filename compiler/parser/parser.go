@@ -57,6 +57,14 @@ func (p *parser) peek() lexer.Token {
 	return p.tokens[p.pos]
 }
 
+func (p *parser) peekAt(offset int) lexer.Token {
+	idx := p.pos + offset
+	if idx >= len(p.tokens) {
+		return p.tokens[len(p.tokens)-1]
+	}
+	return p.tokens[idx]
+}
+
 func (p *parser) peekType() lexer.TokenType {
 	return p.peek().Type
 }
@@ -274,6 +282,11 @@ func (p *parser) parseStmt() (Stmt, error) {
 		return p.parseLoopStmt()
 	case lexer.TokBreak:
 		return &BreakStmt{BreakTok: p.advance()}, nil
+	case lexer.TokIdent:
+		if p.peekAt(1).Type == lexer.TokEq {
+			return p.parseAssignStmt()
+		}
+		return p.parseExprStmt()
 	default:
 		return p.parseExprStmt()
 	}
@@ -281,6 +294,11 @@ func (p *parser) parseStmt() (Stmt, error) {
 
 func (p *parser) parseLetStmt() (*LetStmt, error) {
 	letTok := p.advance() // consume 'let'
+	mut := false
+	if p.check(lexer.TokMut) {
+		p.advance()
+		mut = true
+	}
 
 	nameTok, err := p.expect(lexer.TokIdent)
 	if err != nil {
@@ -303,10 +321,21 @@ func (p *parser) parseLetStmt() (*LetStmt, error) {
 	}
 	return &LetStmt{
 		LetTok:  letTok,
+		Mut:     mut,
 		Name:    nameTok,
 		TypeAnn: typeAnn,
 		Value:   value,
 	}, nil
+}
+
+func (p *parser) parseAssignStmt() (*AssignStmt, error) {
+	name := p.advance() // ident
+	eq := p.advance()   // =
+	value, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	return &AssignStmt{Name: name, Eq: eq, Value: value}, nil
 }
 
 func (p *parser) parseReturnStmt() (*ReturnStmt, error) {
@@ -573,6 +602,25 @@ func (p *parser) parseMustArmBody() (Expr, error) {
 	return p.parseExpr()
 }
 
+func (p *parser) parseMatchExpr() (*MatchExpr, error) {
+	matchTok := p.advance() // consume 'match'
+	x, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.TokLBrace); err != nil {
+		return nil, err
+	}
+	arms, err := p.parseMustArms()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.TokRBrace); err != nil {
+		return nil, err
+	}
+	return &MatchExpr{MatchTok: matchTok, X: x, Arms: arms}, nil
+}
+
 func (p *parser) parsePrimaryExpr() (Expr, error) {
 	t := p.peek()
 	switch t.Type {
@@ -595,6 +643,8 @@ func (p *parser) parsePrimaryExpr() (Expr, error) {
 	case lexer.TokSome, lexer.TokNone, lexer.TokOk, lexer.TokErr, lexer.TokMove:
 		p.advance()
 		return &IdentExpr{Tok: t}, nil
+	case lexer.TokMatch:
+		return p.parseMatchExpr()
 	case lexer.TokLParen:
 		p.advance()
 		expr, err := p.parseExpr()

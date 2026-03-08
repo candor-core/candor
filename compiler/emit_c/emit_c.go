@@ -42,6 +42,12 @@ type emitter struct {
 	// current function context
 	retIsUnit bool // true when emitting a fn returning unit (C void)
 	isMain    bool // true when emitting the special main function
+	tmpCount  int
+}
+
+func (e *emitter) freshTmp() string {
+	e.tmpCount++
+	return fmt.Sprintf("_cnd%d", e.tmpCount)
 }
 
 func (e *emitter) write(s string)              { e.sb.WriteString(s) }
@@ -54,6 +60,11 @@ func (e *emitter) emitFile(file *parser.File) error {
 	e.writeln("#include <stdint.h>")
 	e.writeln("#include <stdio.h>")
 	e.writeln("")
+
+	// Emit result<T,E> struct typedefs used in this file.
+	if err := e.emitResultStructs(); err != nil {
+		return err
+	}
 
 	// Forward-declare all structs first so they can reference each other.
 	for _, decl := range file.Decls {
@@ -93,6 +104,56 @@ func (e *emitter) emitFile(file *parser.File) error {
 	}
 
 	return nil
+}
+
+func (e *emitter) emitResultStructs() error {
+	seen := map[string]bool{}
+	for _, t := range e.res.ExprTypes {
+		gen, ok := t.(*typeck.GenType)
+		if !ok || gen.Con != "result" || len(gen.Params) != 2 {
+			continue
+		}
+		name, err := e.resultTypeName(gen)
+		if err != nil {
+			continue // skip unsupported combinations
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		okC, err := e.cType(gen.Params[0])
+		if err != nil {
+			return err
+		}
+		errC, err := e.cType(gen.Params[1])
+		if err != nil {
+			return err
+		}
+		e.writef("typedef struct { int _ok; %s _ok_val; %s _err_val; } %s;\n", okC, errC, name)
+	}
+	if len(seen) > 0 {
+		e.writeln("")
+	}
+	return nil
+}
+
+func (e *emitter) resultTypeName(gen *typeck.GenType) (string, error) {
+	if len(gen.Params) != 2 {
+		return "", fmt.Errorf("result needs 2 params")
+	}
+	ok, err := e.cType(gen.Params[0])
+	if err != nil {
+		return "", err
+	}
+	er, err := e.cType(gen.Params[1])
+	if err != nil {
+		return "", err
+	}
+	mangle := func(s string) string {
+		r := strings.NewReplacer(" ", "_", "*", "ptr", "<", "_", ">", "_", ",", "_")
+		return r.Replace(s)
+	}
+	return fmt.Sprintf("_cnd_result_%s_%s", mangle(ok), mangle(er)), nil
 }
 
 func bodyEndsWithReturn(block *parser.BlockStmt) bool {
@@ -309,6 +370,13 @@ func (e *emitter) emitStmt(stmt parser.Stmt, depth int) error {
 		}
 		e.writef("%s}\n", ind)
 
+	case *parser.AssignStmt:
+		var vb strings.Builder
+		if err := e.emitExpr(s.Value, &vb); err != nil {
+			return err
+		}
+		e.writef("%s%s = %s;\n", indent(depth), s.Name.Lexeme, vb.String())
+
 	default:
 		return fmt.Errorf("unhandled Stmt %T", stmt)
 	}
@@ -426,10 +494,27 @@ func (e *emitter) emitExpr(expr parser.Expr, sb *strings.Builder) error {
 		}
 		fmt.Fprintf(sb, "(%s%s)", op, operand.String())
 
+	case *parser.MustExpr:
+		return e.emitMustOrMatch(ex.X, ex.Arms, e.res.ExprTypes[ex], sb)
+
+	case *parser.MatchExpr:
+		return e.emitMustOrMatch(ex.X, ex.Arms, e.res.ExprTypes[ex], sb)
+
+	case *parser.ReturnExpr:
+		var vb strings.Builder
+		if err := e.emitExpr(ex.Value, &vb); err != nil {
+			return err
+		}
+		fmt.Fprintf(sb, "return %s", vb.String())
+
 	case *parser.CallExpr:
 		// Check for built-in print functions and emit printf directly.
 		if ident, ok := ex.Fn.(*parser.IdentExpr); ok {
 			if handled, err := e.emitBuiltinCall(ident.Tok.Lexeme, ex.Args, sb); handled {
+				return err
+			}
+			// Result/option constructors
+			if handled, err := e.emitConstructorCall(ex, ident, sb); handled {
 				return err
 			}
 		}
@@ -517,6 +602,243 @@ func (e *emitter) emitBuiltinCall(name string, args []parser.Expr, sb *strings.B
 	return true, nil
 }
 
+// ── constructor emission ──────────────────────────────────────────────────────
+
+func (e *emitter) emitConstructorCall(ex *parser.CallExpr, fn *parser.IdentExpr, sb *strings.Builder) (bool, error) {
+	switch fn.Tok.Type {
+	case lexer.TokSome:
+		if len(ex.Args) != 1 {
+			return false, nil
+		}
+		var ab strings.Builder
+		if err := e.emitExpr(ex.Args[0], &ab); err != nil {
+			return true, err
+		}
+		argType := e.res.ExprTypes[ex.Args[0]]
+		if argType == nil {
+			return false, nil
+		}
+		ct, err := e.cType(argType)
+		if err != nil {
+			return true, err
+		}
+		fmt.Fprintf(sb, "&(%s){%s}", ct, ab.String())
+		return true, nil
+
+	case lexer.TokNone:
+		sb.WriteString("NULL")
+		return true, nil
+
+	case lexer.TokOk:
+		if len(ex.Args) != 1 {
+			return false, nil
+		}
+		resType, ok := e.res.ExprTypes[ex].(*typeck.GenType)
+		if !ok || resType.Con != "result" {
+			return false, nil
+		}
+		structName, err := e.resultTypeName(resType)
+		if err != nil {
+			return true, err
+		}
+		var ab strings.Builder
+		if err := e.emitExpr(ex.Args[0], &ab); err != nil {
+			return true, err
+		}
+		fmt.Fprintf(sb, "(%s){ ._ok = 1, ._ok_val = %s }", structName, ab.String())
+		return true, nil
+
+	case lexer.TokErr:
+		if len(ex.Args) != 1 {
+			return false, nil
+		}
+		resType, ok := e.res.ExprTypes[ex].(*typeck.GenType)
+		if !ok || resType.Con != "result" {
+			return false, nil
+		}
+		structName, err := e.resultTypeName(resType)
+		if err != nil {
+			return true, err
+		}
+		var ab strings.Builder
+		if err := e.emitExpr(ex.Args[0], &ab); err != nil {
+			return true, err
+		}
+		fmt.Fprintf(sb, "(%s){ ._ok = 0, ._err_val = %s }", structName, ab.String())
+		return true, nil
+	}
+	return false, nil
+}
+
+// ── must/match emission ───────────────────────────────────────────────────────
+
+func (e *emitter) emitMustOrMatch(x parser.Expr, arms []parser.MustArm, bodyType typeck.Type, sb *strings.Builder) error {
+	tmp := e.freshTmp()
+	res := e.freshTmp()
+
+	xType := e.res.ExprTypes[x]
+
+	var xb strings.Builder
+	if err := e.emitExpr(x, &xb); err != nil {
+		return err
+	}
+
+	var bodyC string
+	if bodyType != nil && !bodyType.Equals(typeck.TUnit) && !bodyType.Equals(typeck.TNever) {
+		ct, err := e.cType(bodyType)
+		if err != nil {
+			return err
+		}
+		bodyC = ct
+	}
+
+	fmt.Fprintf(sb, "(__extension__ ({\n")
+
+	xC, err := e.cType(xType)
+	if err != nil {
+		return err
+	}
+	fmt.Fprintf(sb, "    %s %s = %s;\n", xC, tmp, xb.String())
+
+	if bodyC != "" {
+		fmt.Fprintf(sb, "    %s %s;\n", bodyC, res)
+	}
+
+	for i, arm := range arms {
+		cond, binding, err := e.patternCondAndBinding(arm.Pattern, xType, tmp)
+		if err != nil {
+			return err
+		}
+		if i == 0 {
+			if cond != "" {
+				fmt.Fprintf(sb, "    if (%s) {\n", cond)
+			} else {
+				fmt.Fprintf(sb, "    {\n")
+			}
+		} else {
+			if cond != "" {
+				fmt.Fprintf(sb, "    } else if (%s) {\n", cond)
+			} else {
+				fmt.Fprintf(sb, "    } else {\n")
+			}
+		}
+
+		if binding != "" {
+			fmt.Fprintf(sb, "        %s\n", binding)
+		}
+
+		armType := e.res.ExprTypes[arm.Body]
+		var bodyExpr strings.Builder
+		if err := e.emitExpr(arm.Body, &bodyExpr); err != nil {
+			return err
+		}
+		if armType != nil && armType.Equals(typeck.TNever) {
+			fmt.Fprintf(sb, "        %s;\n", bodyExpr.String())
+		} else if bodyC != "" {
+			fmt.Fprintf(sb, "        %s = %s;\n", res, bodyExpr.String())
+		} else {
+			fmt.Fprintf(sb, "        %s;\n", bodyExpr.String())
+		}
+	}
+	fmt.Fprintf(sb, "    }\n")
+
+	if bodyC != "" {
+		fmt.Fprintf(sb, "    %s;\n", res)
+	} else {
+		fmt.Fprintf(sb, "    (void)0;\n")
+	}
+	fmt.Fprintf(sb, "}))")
+	return nil
+}
+
+func (e *emitter) patternCondAndBinding(pattern parser.Expr, xType typeck.Type, tmp string) (cond string, binding string, err error) {
+	switch p := pattern.(type) {
+	case *parser.IdentExpr:
+		switch p.Tok.Lexeme {
+		case "_":
+			return "", "", nil
+		case "none":
+			return fmt.Sprintf("%s == NULL", tmp), "", nil
+		case "true":
+			return fmt.Sprintf("%s", tmp), "", nil
+		case "false":
+			return fmt.Sprintf("!%s", tmp), "", nil
+		default:
+			bt := e.res.ExprTypes[p]
+			if bt != nil {
+				ct, err := e.cType(bt)
+				if err != nil {
+					return "", "", err
+				}
+				return "", fmt.Sprintf("%s %s = %s;", ct, p.Tok.Lexeme, tmp), nil
+			}
+			return "", "", nil
+		}
+
+	case *parser.BoolLitExpr:
+		if p.Tok.Type == lexer.TokTrue {
+			return tmp, "", nil
+		}
+		return fmt.Sprintf("!%s", tmp), "", nil
+
+	case *parser.CallExpr:
+		fn, ok := p.Fn.(*parser.IdentExpr)
+		if !ok {
+			return "", "", fmt.Errorf("invalid pattern")
+		}
+		switch fn.Tok.Lexeme {
+		case "some":
+			cond = fmt.Sprintf("%s != NULL", tmp)
+			if len(p.Args) == 1 {
+				if v, ok2 := p.Args[0].(*parser.IdentExpr); ok2 {
+					vType := e.res.ExprTypes[v]
+					if vType != nil {
+						ct, err := e.cType(vType)
+						if err != nil {
+							return "", "", err
+						}
+						binding = fmt.Sprintf("%s %s = *%s;", ct, v.Tok.Lexeme, tmp)
+					}
+				}
+			}
+			return cond, binding, nil
+
+		case "ok":
+			cond = fmt.Sprintf("%s._ok", tmp)
+			if len(p.Args) == 1 {
+				if v, ok2 := p.Args[0].(*parser.IdentExpr); ok2 {
+					vType := e.res.ExprTypes[v]
+					if vType != nil {
+						ct, err := e.cType(vType)
+						if err != nil {
+							return "", "", err
+						}
+						binding = fmt.Sprintf("%s %s = %s._ok_val;", ct, v.Tok.Lexeme, tmp)
+					}
+				}
+			}
+			return cond, binding, nil
+
+		case "err":
+			cond = fmt.Sprintf("!%s._ok", tmp)
+			if len(p.Args) == 1 {
+				if v, ok2 := p.Args[0].(*parser.IdentExpr); ok2 {
+					vType := e.res.ExprTypes[v]
+					if vType != nil {
+						ct, err := e.cType(vType)
+						if err != nil {
+							return "", "", err
+						}
+						binding = fmt.Sprintf("%s %s = %s._err_val;", ct, v.Tok.Lexeme, tmp)
+					}
+				}
+			}
+			return cond, binding, nil
+		}
+	}
+	return "", "", nil
+}
+
 // ── type mapping ──────────────────────────────────────────────────────────────
 
 func (e *emitter) cType(t typeck.Type) (string, error) {
@@ -581,6 +903,10 @@ func (e *emitter) cType(t typeck.Type) (string, error) {
 					return "", err
 				}
 				return inner + "*", nil // null == none
+			}
+		case "result":
+			if len(tt.Params) == 2 {
+				return e.resultTypeName(tt)
 			}
 		}
 		return "", fmt.Errorf("unsupported generic type: %s", t)

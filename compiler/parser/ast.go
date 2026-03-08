@@ -77,9 +77,10 @@ type BlockStmt struct {
 func (s *BlockStmt) Pos() lexer.Token { return s.LBrace }
 func (s *BlockStmt) stmtNode()        {}
 
-// LetStmt: let name [: Type] = value
+// LetStmt: let [mut] name [: Type] = value
 type LetStmt struct {
 	LetTok  lexer.Token
+	Mut     bool
 	Name    lexer.Token
 	TypeAnn TypeExpr // nil when type is inferred
 	Value   Expr
@@ -132,6 +133,16 @@ type BreakStmt struct {
 
 func (s *BreakStmt) Pos() lexer.Token { return s.BreakTok }
 func (s *BreakStmt) stmtNode()        {}
+
+// AssignStmt: name = value  (requires mutable binding)
+type AssignStmt struct {
+	Name  lexer.Token
+	Eq    lexer.Token
+	Value Expr
+}
+
+func (s *AssignStmt) Pos() lexer.Token { return s.Name }
+func (s *AssignStmt) stmtNode()        {}
 
 // ── Expressions ──────────────────────────────────────────────────────────────
 
@@ -229,6 +240,17 @@ type MustArm struct {
 	Arrow   lexer.Token
 	Body    Expr
 }
+
+// MatchExpr: match expr { arms }
+// Arms reuse the MustArm type.
+type MatchExpr struct {
+	MatchTok lexer.Token
+	X        Expr
+	Arms     []MustArm
+}
+
+func (e *MatchExpr) Pos() lexer.Token { return e.MatchTok }
+func (e *MatchExpr) exprNode()        {}
 
 // ReturnExpr wraps `return value` when it appears inside a must{} arm body.
 // Its type is `never` — it exits the enclosing function, not the arm.

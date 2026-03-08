@@ -287,3 +287,35 @@ func TestReturnWrongNumericType(t *testing.T) {
 		`fn f(x: u32) -> i32 { return x }`,
 		"return type mismatch")
 }
+
+// ── mut and assignment ────────────────────────────────────────────────────────
+
+func TestLetMut(t *testing.T) {
+	mustCompile(t, `fn f() -> unit { let mut x: u32 = 0 return unit }`)
+}
+
+func TestAssignToMutable(t *testing.T) {
+	mustCompile(t, `fn f() -> unit { let mut x: u32 = 0 x = 42 return unit }`)
+}
+
+func TestAssignToImmutable(t *testing.T) {
+	mustFail(t,
+		`fn f() -> unit { let x: u32 = 0 x = 42 return unit }`,
+		"cannot assign to immutable")
+}
+
+// ── match expression ──────────────────────────────────────────────────────────
+
+func TestMatchOnBool(t *testing.T) {
+	mustCompile(t, `fn f(b: bool) -> u32 { return match b { true => 1 false => 2 } }`)
+}
+
+func TestMatchOnOption(t *testing.T) {
+	mustCompile(t, `
+fn f(x: option<u32>) -> u32 {
+    return match x {
+        some(v) => v
+        none    => 0
+    }
+}`)
+}

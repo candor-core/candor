@@ -70,18 +70,23 @@ type checker struct {
 }
 
 // scope is a linked chain of variable bindings.
+type varInfo struct {
+	typ     Type
+	mutable bool
+}
+
 type scope struct {
-	vars   map[string]Type
+	vars   map[string]varInfo
 	parent *scope
 }
 
 func newScope(parent *scope) *scope {
-	return &scope{vars: make(map[string]Type), parent: parent}
+	return &scope{vars: make(map[string]varInfo), parent: parent}
 }
 
 func (s *scope) lookup(name string) (Type, bool) {
-	if t, ok := s.vars[name]; ok {
-		return t, true
+	if info, ok := s.vars[name]; ok {
+		return info.typ, true
 	}
 	if s.parent != nil {
 		return s.parent.lookup(name)
@@ -89,8 +94,22 @@ func (s *scope) lookup(name string) (Type, bool) {
 	return nil, false
 }
 
+func (s *scope) lookupInfo(name string) (varInfo, bool) {
+	if info, ok := s.vars[name]; ok {
+		return info, true
+	}
+	if s.parent != nil {
+		return s.parent.lookupInfo(name)
+	}
+	return varInfo{}, false
+}
+
 func (s *scope) define(name string, t Type) {
-	s.vars[name] = t
+	s.vars[name] = varInfo{typ: t, mutable: false}
+}
+
+func (s *scope) defineMut(name string, t Type) {
+	s.vars[name] = varInfo{typ: t, mutable: true}
 }
 
 func (c *checker) record(expr parser.Expr, t Type) Type {
@@ -254,9 +273,31 @@ func (c *checker) checkStmt(stmt parser.Stmt, sc *scope, retType Type) error {
 		return nil
 	case *parser.BlockStmt:
 		return c.checkBlock(s, sc, retType)
+	case *parser.AssignStmt:
+		return c.checkAssignStmt(s, sc)
 	default:
 		return fmt.Errorf("unhandled Stmt %T", stmt)
 	}
+}
+
+func (c *checker) checkAssignStmt(s *parser.AssignStmt, sc *scope) error {
+	info, ok := sc.lookupInfo(s.Name.Lexeme)
+	if !ok {
+		return c.errorf(s.Name, "undefined identifier %q", s.Name.Lexeme)
+	}
+	if !info.mutable {
+		return c.errorf(s.Name, "cannot assign to immutable variable %q", s.Name.Lexeme)
+	}
+	valType, err := c.checkExpr(s.Value, sc, info.typ)
+	if err != nil {
+		return err
+	}
+	coerced, ok := Coerce(valType, info.typ)
+	if !ok {
+		return c.errorf(s.Name, "type mismatch: cannot assign %s to %s", valType, info.typ)
+	}
+	c.exprTypes[s.Value] = coerced
+	return nil
 }
 
 func (c *checker) checkLetStmt(s *parser.LetStmt, sc *scope) error {
@@ -280,7 +321,11 @@ func (c *checker) checkLetStmt(s *parser.LetStmt, sc *scope) error {
 		valType = coerced
 		c.exprTypes[s.Value] = coerced
 	}
-	sc.define(s.Name.Lexeme, valType)
+	if s.Mut {
+		sc.defineMut(s.Name.Lexeme, valType)
+	} else {
+		sc.define(s.Name.Lexeme, valType)
+	}
 	return nil
 }
 
@@ -363,7 +408,16 @@ func (c *checker) inferExpr(expr parser.Expr, sc *scope, hint Type) (Type, error
 		return c.inferUnaryExpr(e, sc, hint)
 
 	case *parser.CallExpr:
+		if ident, ok := e.Fn.(*parser.IdentExpr); ok {
+			switch ident.Tok.Type {
+			case lexer.TokOk, lexer.TokErr, lexer.TokSome, lexer.TokNone:
+				return c.inferConstructorCall(e, ident, sc, hint)
+			}
+		}
 		return c.inferCallExpr(e, sc)
+
+	case *parser.MatchExpr:
+		return c.inferMatchExpr(e, sc, hint)
 
 	case *parser.FieldExpr:
 		return c.inferFieldExpr(e, sc)
@@ -596,10 +650,11 @@ func (c *checker) inferMustExpr(e *parser.MustExpr, sc *scope, hint Type) (Type,
 	// Check each arm body; collect non-never types
 	var bodyType Type
 	for _, arm := range e.Arms {
-		if _, err := c.checkExpr(arm.Pattern, sc, nil); err != nil {
+		armSc, err := c.checkPattern(arm.Pattern, gen, sc)
+		if err != nil {
 			return nil, err
 		}
-		armType, err := c.checkExpr(arm.Body, sc, hint)
+		armType, err := c.checkExpr(arm.Body, armSc, hint)
 		if err != nil {
 			return nil, err
 		}
@@ -621,4 +676,193 @@ func (c *checker) inferMustExpr(e *parser.MustExpr, sc *scope, hint Type) (Type,
 		bodyType = TUnit
 	}
 	return bodyType, nil
+}
+
+func (c *checker) inferMatchExpr(e *parser.MatchExpr, sc *scope, hint Type) (Type, error) {
+	matchedType, err := c.checkExpr(e.X, sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	var bodyType Type
+	for _, arm := range e.Arms {
+		armSc, err := c.checkPattern(arm.Pattern, matchedType, sc)
+		if err != nil {
+			return nil, err
+		}
+		armType, err := c.checkExpr(arm.Body, armSc, hint)
+		if err != nil {
+			return nil, err
+		}
+		if armType.Equals(TNever) {
+			continue
+		}
+		if bodyType == nil {
+			bodyType = armType
+		} else {
+			unified, ok := Unify(bodyType, armType)
+			if !ok {
+				return nil, c.errorf(arm.Arrow,
+					"match arm type %s does not match expected %s", armType, bodyType)
+			}
+			bodyType = unified
+		}
+	}
+	if bodyType == nil {
+		bodyType = TUnit
+	}
+	return bodyType, nil
+}
+
+// checkPattern processes a match/must arm pattern, records types, and returns
+// a new scope with any bound variables.
+func (c *checker) checkPattern(pattern parser.Expr, matchedType Type, sc *scope) (*scope, error) {
+	armSc := newScope(sc)
+	switch p := pattern.(type) {
+	case *parser.IdentExpr:
+		name := p.Tok.Lexeme
+		switch name {
+		case "_":
+			c.record(p, TUnit)
+		case "none":
+			c.record(p, matchedType)
+		default:
+			// bare identifier: treat as wildcard binding
+			c.record(p, matchedType)
+			armSc.define(name, matchedType)
+		}
+	case *parser.CallExpr:
+		fn, ok := p.Fn.(*parser.IdentExpr)
+		if !ok {
+			return nil, c.errorf(p.Fn.Pos(), "invalid pattern")
+		}
+		c.record(fn, matchedType)
+		switch fn.Tok.Lexeme {
+		case "some":
+			gen, ok := matchedType.(*GenType)
+			if !ok || gen.Con != "option" || len(gen.Params) == 0 {
+				return nil, c.errorf(fn.Tok, "some() pattern requires option<T>, got %s", matchedType)
+			}
+			innerType := gen.Params[0]
+			if len(p.Args) == 1 {
+				if v, ok2 := p.Args[0].(*parser.IdentExpr); ok2 {
+					armSc.define(v.Tok.Lexeme, innerType)
+					c.record(v, innerType)
+				}
+			}
+		case "ok":
+			gen, ok := matchedType.(*GenType)
+			if !ok || gen.Con != "result" || len(gen.Params) == 0 {
+				return nil, c.errorf(fn.Tok, "ok() pattern requires result<T,E>, got %s", matchedType)
+			}
+			innerType := gen.Params[0]
+			if len(p.Args) == 1 {
+				if v, ok2 := p.Args[0].(*parser.IdentExpr); ok2 {
+					armSc.define(v.Tok.Lexeme, innerType)
+					c.record(v, innerType)
+				}
+			}
+		case "err":
+			gen, ok := matchedType.(*GenType)
+			if !ok || gen.Con != "result" || len(gen.Params) < 2 {
+				return nil, c.errorf(fn.Tok, "err() pattern requires result<T,E>, got %s", matchedType)
+			}
+			innerType := gen.Params[1]
+			if len(p.Args) == 1 {
+				if v, ok2 := p.Args[0].(*parser.IdentExpr); ok2 {
+					armSc.define(v.Tok.Lexeme, innerType)
+					c.record(v, innerType)
+				}
+			}
+		default:
+			return nil, c.errorf(fn.Tok, "unknown pattern constructor %q", fn.Tok.Lexeme)
+		}
+	default:
+		// Literal pattern: check as expression
+		if _, err := c.checkExpr(pattern, sc, matchedType); err != nil {
+			return nil, err
+		}
+	}
+	return armSc, nil
+}
+
+func (c *checker) inferConstructorCall(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope, hint Type) (Type, error) {
+	switch fn.Tok.Type {
+	case lexer.TokSome:
+		if len(e.Args) != 1 {
+			return nil, c.errorf(e.LParen, "some() takes 1 argument")
+		}
+		var innerHint Type
+		if gen, ok := hint.(*GenType); ok && gen.Con == "option" && len(gen.Params) > 0 {
+			innerHint = gen.Params[0]
+		}
+		argType, err := c.checkExpr(e.Args[0], sc, innerHint)
+		if err != nil {
+			return nil, err
+		}
+		t := &GenType{Con: "option", Params: []Type{argType}}
+		c.record(fn, t)
+		return t, nil
+
+	case lexer.TokNone:
+		if hint != nil {
+			if gen, ok := hint.(*GenType); ok && gen.Con == "option" {
+				c.record(fn, hint)
+				return hint, nil
+			}
+		}
+		t := &GenType{Con: "option"}
+		c.record(fn, t)
+		return t, nil
+
+	case lexer.TokOk:
+		if len(e.Args) != 1 {
+			return nil, c.errorf(e.LParen, "ok() takes 1 argument")
+		}
+		var innerHint Type
+		var errHintType Type
+		if gen, ok := hint.(*GenType); ok && gen.Con == "result" {
+			if len(gen.Params) > 0 {
+				innerHint = gen.Params[0]
+			}
+			if len(gen.Params) > 1 {
+				errHintType = gen.Params[1]
+			}
+		}
+		argType, err := c.checkExpr(e.Args[0], sc, innerHint)
+		if err != nil {
+			return nil, err
+		}
+		if errHintType == nil {
+			errHintType = &GenType{Con: "_err"}
+		}
+		t := &GenType{Con: "result", Params: []Type{argType, errHintType}}
+		c.record(fn, t)
+		return t, nil
+
+	case lexer.TokErr:
+		if len(e.Args) != 1 {
+			return nil, c.errorf(e.LParen, "err() takes 1 argument")
+		}
+		var innerHint Type
+		var okHintType Type
+		if gen, ok := hint.(*GenType); ok && gen.Con == "result" {
+			if len(gen.Params) > 1 {
+				innerHint = gen.Params[1]
+			}
+			if len(gen.Params) > 0 {
+				okHintType = gen.Params[0]
+			}
+		}
+		argType, err := c.checkExpr(e.Args[0], sc, innerHint)
+		if err != nil {
+			return nil, err
+		}
+		if okHintType == nil {
+			okHintType = &GenType{Con: "_ok"}
+		}
+		t := &GenType{Con: "result", Params: []Type{okHintType, argType}}
+		c.record(fn, t)
+		return t, nil
+	}
+	return nil, fmt.Errorf("unreachable constructor")
 }

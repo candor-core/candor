@@ -392,6 +392,52 @@ fn f() -> unit { return unit }
 	}
 }
 
+// ── mut and assignment ────────────────────────────────────────────────────────
+
+func TestLetMut(t *testing.T) {
+	file := parse(t, `fn f() -> unit { let mut x: u32 = 0 return unit }`)
+	fn := file.Decls[0].(*FnDecl)
+	let := fn.Body.Stmts[0].(*LetStmt)
+	if !let.Mut {
+		t.Fatal("expected LetStmt.Mut == true")
+	}
+	if let.Name.Lexeme != "x" {
+		t.Errorf("name: want 'x', got %q", let.Name.Lexeme)
+	}
+}
+
+func TestAssignStmt(t *testing.T) {
+	file := parse(t, `fn f() -> unit { let mut x: u32 = 0 x = 1 return unit }`)
+	fn := file.Decls[0].(*FnDecl)
+	if len(fn.Body.Stmts) != 3 {
+		t.Fatalf("want 3 stmts, got %d", len(fn.Body.Stmts))
+	}
+	assign, ok := fn.Body.Stmts[1].(*AssignStmt)
+	if !ok {
+		t.Fatalf("stmt[1] must be *AssignStmt, got %T", fn.Body.Stmts[1])
+	}
+	if assign.Name.Lexeme != "x" {
+		t.Errorf("assign name: want 'x', got %q", assign.Name.Lexeme)
+	}
+}
+
+func TestMatchExpr(t *testing.T) {
+	src := `fn f(x: bool) -> unit { match x { true => unit false => unit } return unit }`
+	file := parse(t, src)
+	fn := file.Decls[0].(*FnDecl)
+	exprStmt, ok := fn.Body.Stmts[0].(*ExprStmt)
+	if !ok {
+		t.Fatalf("stmt[0] must be *ExprStmt, got %T", fn.Body.Stmts[0])
+	}
+	m, ok := exprStmt.X.(*MatchExpr)
+	if !ok {
+		t.Fatalf("expr must be *MatchExpr, got %T", exprStmt.X)
+	}
+	if len(m.Arms) != 2 {
+		t.Errorf("match arms: want 2, got %d", len(m.Arms))
+	}
+}
+
 // ── Error cases ───────────────────────────────────────────────────────────────
 
 func TestMissingReturnType(t *testing.T) {

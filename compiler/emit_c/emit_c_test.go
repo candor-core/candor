@@ -267,3 +267,38 @@ func TestIncludes(t *testing.T) {
 	assertContains(t, out, "#include <stdint.h>")
 	assertContains(t, out, "#include <stdio.h>")
 }
+
+// ── mut and assignment ────────────────────────────────────────────────────────
+
+func TestMutAndAssign(t *testing.T) {
+	src := `fn f() -> unit { let mut x: u32 = 0 x = 42 return unit }`
+	out := pipeline(t, src)
+	t.Logf("emitted C:\n%s", out)
+	assertContains(t, out, "uint32_t x = 0")
+	assertContains(t, out, "x = 42")
+}
+
+// ── match expression ──────────────────────────────────────────────────────────
+
+func TestMatchOnBool(t *testing.T) {
+	src := `fn f(b: bool) -> u32 { return match b { true => 1 false => 2 } }`
+	out := pipeline(t, src)
+	t.Logf("emitted C:\n%s", out)
+	assertContains(t, out, "__extension__")
+	// should have an if condition for true
+	assertContains(t, out, "if (")
+}
+
+func TestMatchOnOption(t *testing.T) {
+	src := `
+fn f(x: option<u32>) -> u32 {
+    return match x {
+        some(v) => v
+        none    => 0
+    }
+}`
+	out := pipeline(t, src)
+	t.Logf("emitted C:\n%s", out)
+	assertContains(t, out, "!= NULL")
+	assertContains(t, out, "== NULL")
+}

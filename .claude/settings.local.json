@@ -1,0 +1,29 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go version)",
+      "Bash(go build ./...)",
+      "Bash(go run . hello.cnd)",
+      "Bash(gh auth status)",
+      "Bash(ssh -T git@github.com)",
+      "Bash(perl -i -pe 's/\\(?<!-\\)-- \\(?!-\\)/## /g' SPEC.md README.md CANDOR_KNOWLEDGE_ITEM.md)",
+      "Bash(perl -i -pe 's/\\(?<=[^-]\\)-- \\(?!-\\)/## /g; s/^-- /## /g' SPEC.md README.md CANDOR_KNOWLEDGE_ITEM.md)",
+      "Bash(go test ./lexer/... -v)",
+      "Bash(go test ./parser/... -v)",
+      "Bash(go test ./typeck/... -v)",
+      "Bash(go test ./...)",
+      "Bash(go build ./emit_c/...)",
+      "Bash(go test ./emit_c/... -v)",
+      "Bash(go build .)",
+      "Bash(go test ./tests/... -v)",
+      "Bash(git add compiler/lexer/token.go compiler/lexer/lexer.go compiler/lexer/lexer_test.go compiler/parser/ast.go compiler/parser/parser.go compiler/parser/parser_test.go compiler/typeck/types.go compiler/typeck/typeck.go compiler/typeck/typeck_test.go compiler/emit_c/emit_c.go compiler/emit_c/emit_c_test.go compiler/tests/integration_test.go compiler/main.go SPEC.md README.md CANDOR_KNOWLEDGE_ITEM.md)",
+      "Bash(git commit:*)",
+      "Bash(git push)",
+      "Bash(go test ./emit_c/... ./tests/... -v)",
+      "Bash(git add compiler/typeck/typeck.go compiler/emit_c/emit_c.go compiler/emit_c/emit_c_test.go compiler/tests/integration_test.go)",
+      "Bash(go test ./tests/... -run=^$ -bench=. -benchmem -benchtime=3s)",
+      "Bash(go test ./... -v)",
+      "Bash(go clean -testcache)"
+    ]
+  }
+}

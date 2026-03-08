@@ -274,6 +274,149 @@ fn main() -> unit {
 	}
 }
 
+// compileMulti merges multiple named sources, runs the full pipeline, and
+// returns the path to the compiled binary.
+func compileMulti(t *testing.T, dir, name string, srcs map[string]string) string {
+	t.Helper()
+
+	var allDecls []parser.Decl
+	var firstName string
+	// Stable order: sort the keys.
+	keys := make([]string, 0, len(srcs))
+	for k := range srcs {
+		keys = append(keys, k)
+	}
+	// sort alphabetically for determinism
+	for i := 0; i < len(keys)-1; i++ {
+		for j := i + 1; j < len(keys); j++ {
+			if keys[i] > keys[j] {
+				keys[i], keys[j] = keys[j], keys[i]
+			}
+		}
+	}
+	for _, k := range keys {
+		src := srcs[k]
+		fakePath := filepath.Join(dir, k+".cnd")
+		if err := os.WriteFile(fakePath, []byte(src), 0o644); err != nil {
+			t.Fatalf("write source %s: %v", k, err)
+		}
+		tokens, err := lexer.Tokenize(fakePath, src)
+		if err != nil {
+			t.Fatalf("lex %s: %v", k, err)
+		}
+		file, err := parser.Parse(fakePath, tokens)
+		if err != nil {
+			t.Fatalf("parse %s: %v", k, err)
+		}
+		allDecls = append(allDecls, file.Decls...)
+		if firstName == "" {
+			firstName = fakePath
+		}
+	}
+
+	merged := &parser.File{Name: firstName, Decls: allDecls}
+	res, err := typeck.Check(merged)
+	if err != nil {
+		t.Fatalf("typeck: %v", err)
+	}
+	cSrc, err := emit_c.Emit(merged, res)
+	if err != nil {
+		t.Fatalf("emit: %v", err)
+	}
+
+	cPath := filepath.Join(dir, name+".c")
+	if err := os.WriteFile(cPath, []byte(cSrc), 0o644); err != nil {
+		t.Fatalf("write C: %v", err)
+	}
+	t.Logf("emitted C:\n%s", cSrc)
+
+	binPath := filepath.Join(dir, name)
+	if runtime.GOOS == "windows" {
+		binPath += ".exe"
+	}
+
+	cc := findCC()
+	out, err := exec.Command(cc, "-o", binPath, cPath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("CC failed:\n%s\n%v", out, err)
+	}
+	return binPath
+}
+
+// TestMutableVariable tests a loop counting to 5, printing result.
+func TestMutableVariable(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+    let mut count: u32 = 0
+    count = 5
+    print_u32(count)
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "mut_var", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("binary failed: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "5\n" {
+		t.Errorf("stdout: got %q, want %q", got, "5\n")
+	}
+}
+
+// TestMatchExpression tests matching on a bool value.
+func TestMatchExpression(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn f(b: bool) -> u32 {
+    return match b {
+        true  => 1
+        false => 2
+    }
+}
+fn main() -> unit {
+    print_u32(f(true))
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "match_bool", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("binary failed: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "1\n" {
+		t.Errorf("stdout: got %q, want %q", got, "1\n")
+	}
+}
+
+// TestMultiFile tests two source files merged together.
+func TestMultiFile(t *testing.T) {
+	skipIfNoCC(t)
+	srcs := map[string]string{
+		"a_helpers": `fn add(a: u32, b: u32) -> u32 { return a + b }`,
+		"b_main": `
+fn main() -> unit {
+    print_u32(add(10, 32))
+    return unit
+}
+`,
+	}
+	dir := t.TempDir()
+	bin := compileMulti(t, dir, "multifile", srcs)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("binary failed: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "42\n" {
+		t.Errorf("stdout: got %q, want %q", got, "42\n")
+	}
+}
+
 // TestEmittedCIsValidC verifies the C output for the acceptance criterion
 // contains no obvious invalid patterns.
 func TestEmittedCIsValidC(t *testing.T) {
