@@ -230,6 +230,36 @@ fn bar() -> u32 { return foo() }
 	}
 }
 
+// ── Built-in print functions ──────────────────────────────────────────────────
+
+func TestPrintStr(t *testing.T) {
+	out := pipeline(t, `fn main() -> unit { print("hello") return unit }`)
+	assertContains(t, out, `printf("%s\n"`)
+	assertContains(t, out, `"hello"`)
+}
+
+func TestPrintInt(t *testing.T) {
+	out := pipeline(t, `fn main() -> unit { print_int(42) return unit }`)
+	assertContains(t, out, `printf("%lld\n"`)
+	assertContains(t, out, `(long long)`)
+}
+
+func TestPrintU32(t *testing.T) {
+	out := pipeline(t, `fn main() -> unit { print_u32(99) return unit }`)
+	assertContains(t, out, `printf("%u\n"`)
+}
+
+func TestPrintBool(t *testing.T) {
+	out := pipeline(t, `fn main() -> unit { print_bool(true) return unit }`)
+	assertContains(t, out, `"true"`)
+	assertContains(t, out, `"false"`)
+}
+
+func TestPrintF64(t *testing.T) {
+	out := pipeline(t, `fn main() -> unit { print_f64(3.14) return unit }`)
+	assertContains(t, out, `printf("%f\n"`)
+}
+
 // ── Includes ──────────────────────────────────────────────────────────────────
 
 func TestIncludes(t *testing.T) {

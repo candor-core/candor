@@ -193,6 +193,87 @@ fn main() -> unit {
 	}
 }
 
+// TestPrintBuiltins compiles and runs programs using the built-in print
+// functions and verifies their stdout output.
+func TestPrintBuiltins(t *testing.T) {
+	skipIfNoCC(t)
+
+	cases := []struct {
+		name string
+		src  string
+		want string
+	}{
+		{
+			name: "print_str",
+			src: `fn main() -> unit {
+    print("hello candor")
+    return unit
+}`,
+			want: "hello candor\n",
+		},
+		{
+			name: "print_int",
+			src: `fn main() -> unit {
+    print_int(42)
+    return unit
+}`,
+			want: "42\n",
+		},
+		{
+			name: "print_u32",
+			src: `fn main() -> unit {
+    print_u32(99)
+    return unit
+}`,
+			want: "99\n",
+		},
+		{
+			name: "print_bool_true",
+			src: `fn main() -> unit {
+    print_bool(true)
+    return unit
+}`,
+			want: "true\n",
+		},
+		{
+			name: "print_bool_false",
+			src: `fn main() -> unit {
+    print_bool(false)
+    return unit
+}`,
+			want: "false\n",
+		},
+		{
+			name: "print_computed",
+			src: `
+fn add(a: u32, b: u32) -> u32 { return a + b }
+fn main() -> unit {
+    let x = add(3, 4)
+    print_u32(x)
+    return unit
+}`,
+			want: "7\n",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			bin := compile(t, dir, tc.name, tc.src)
+
+			out, err := exec.Command(bin).Output()
+			if err != nil {
+				t.Fatalf("binary failed: %v", err)
+			}
+			// Normalize Windows \r\n to \n.
+			got := strings.ReplaceAll(string(out), "\r\n", "\n")
+			if got != tc.want {
+				t.Errorf("stdout: got %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestEmittedCIsValidC verifies the C output for the acceptance criterion
 // contains no obvious invalid patterns.
 func TestEmittedCIsValidC(t *testing.T) {

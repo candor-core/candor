@@ -104,7 +104,21 @@ func (c *checker) errorf(tok lexer.Token, format string, args ...any) error {
 
 // ── Pass 1: collect signatures ────────────────────────────────────────────────
 
+// Builtins are built-in function signatures injected before user code is
+// checked. They have no Candor source; the emitter special-cases their calls.
+var Builtins = map[string]*FnType{
+	"print":      {Params: []Type{TStr}, Ret: TUnit},
+	"print_int":  {Params: []Type{TI64}, Ret: TUnit},
+	"print_bool": {Params: []Type{TBool}, Ret: TUnit},
+	"print_u32":  {Params: []Type{TU32}, Ret: TUnit},
+	"print_f64":  {Params: []Type{TF64}, Ret: TUnit},
+}
+
 func (c *checker) checkFile(file *parser.File) error {
+	// Inject built-in signatures first so user code can call them.
+	for name, sig := range Builtins {
+		c.fnSigs[name] = sig
+	}
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *parser.FnDecl:

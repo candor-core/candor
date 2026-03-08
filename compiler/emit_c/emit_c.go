@@ -427,6 +427,12 @@ func (e *emitter) emitExpr(expr parser.Expr, sb *strings.Builder) error {
 		fmt.Fprintf(sb, "(%s%s)", op, operand.String())
 
 	case *parser.CallExpr:
+		// Check for built-in print functions and emit printf directly.
+		if ident, ok := ex.Fn.(*parser.IdentExpr); ok {
+			if handled, err := e.emitBuiltinCall(ident.Tok.Lexeme, ex.Args, sb); handled {
+				return err
+			}
+		}
 		var fn strings.Builder
 		if err := e.emitExpr(ex.Fn, &fn); err != nil {
 			return err
@@ -469,6 +475,46 @@ func (e *emitter) emitExpr(expr parser.Expr, sb *strings.Builder) error {
 		return fmt.Errorf("unhandled Expr %T in emit", expr)
 	}
 	return nil
+}
+
+// ── built-in print functions ──────────────────────────────────────────────────
+
+// emitBuiltinCall handles the print_* built-ins, emitting printf calls.
+// Returns (true, err) if the name was a built-in; (false, nil) otherwise.
+func (e *emitter) emitBuiltinCall(name string, args []parser.Expr, sb *strings.Builder) (bool, error) {
+	if len(args) != 1 {
+		return false, nil
+	}
+	var fmt_str string
+	var cast string
+	switch name {
+	case "print":
+		fmt_str = "%s\\n"
+	case "print_int":
+		fmt_str = "%lld\\n"
+		cast = "(long long)"
+	case "print_u32":
+		fmt_str = "%u\\n"
+	case "print_bool":
+		// handled specially below
+	case "print_f64":
+		fmt_str = "%f\\n"
+	default:
+		return false, nil
+	}
+
+	var ab strings.Builder
+	if err := e.emitExpr(args[0], &ab); err != nil {
+		return true, err
+	}
+	arg := ab.String()
+
+	if name == "print_bool" {
+		fmt.Fprintf(sb, `printf("%%s\n", (%s) ? "true" : "false")`, arg)
+	} else {
+		fmt.Fprintf(sb, `printf("%s", %s%s)`, fmt_str, cast, arg)
+	}
+	return true, nil
 }
 
 // ── type mapping ──────────────────────────────────────────────────────────────
