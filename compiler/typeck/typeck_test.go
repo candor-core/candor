@@ -5,6 +5,7 @@
 package typeck
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -522,6 +523,138 @@ fn f(x: option<u32>) -> u32 {
         none    => 0
     }
 }`)
+}
+
+// ── CheckProgram helpers and module enforcement tests ─────────────────────────
+
+// compileProgram parses each src string as a separate file and runs CheckProgram.
+func compileProgram(srcs ...string) (*Result, error) {
+	files := make([]*parser.File, len(srcs))
+	for i, src := range srcs {
+		name := fmt.Sprintf("<test%d>", i)
+		tokens, err := lexer.Tokenize(name, src)
+		if err != nil {
+			return nil, err
+		}
+		f, err := parser.Parse(name, tokens)
+		if err != nil {
+			return nil, err
+		}
+		files[i] = f
+	}
+	return CheckProgram(files)
+}
+
+func mustCompileProgram(t *testing.T, srcs ...string) {
+	t.Helper()
+	if _, err := compileProgram(srcs...); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func mustFailProgram(t *testing.T, want string, srcs ...string) {
+	t.Helper()
+	_, err := compileProgram(srcs...)
+	if err == nil {
+		t.Fatalf("expected error containing %q, got nil", want)
+	}
+	if !strings.Contains(err.Error(), want) {
+		t.Fatalf("expected error containing %q, got: %v", want, err)
+	}
+}
+
+func TestCheckProgramSingleFile(t *testing.T) {
+	mustCompileProgram(t, `
+fn add(a: u32, b: u32) -> u32 { return a + b }
+fn main() -> unit { let x = add(1, 2) return unit }`)
+}
+
+func TestCheckProgramMultiFileNoModules(t *testing.T) {
+	mustCompileProgram(t,
+		`fn add(a: u32, b: u32) -> u32 { return a + b }`,
+		`fn main() -> unit { let x = add(1, 2) return unit }`,
+	)
+}
+
+func TestModuleEnforcementCrossModuleFnBlocked(t *testing.T) {
+	mustFailProgram(t, `"greet" is from module "greet"`,
+		`module greet
+fn greet() -> unit { return unit }`,
+		`module app
+fn main() -> unit { greet() return unit }`,
+	)
+}
+
+func TestModuleEnforcementCrossModuleFnAllowed(t *testing.T) {
+	mustCompileProgram(t,
+		`module greet
+fn greet() -> unit { return unit }`,
+		`module app
+use greet::greet
+fn main() -> unit { greet() return unit }`,
+	)
+}
+
+func TestModuleEnforcementSameModuleAlwaysVisible(t *testing.T) {
+	mustCompileProgram(t,
+		`module math
+fn add(a: u32, b: u32) -> u32 { return a + b }`,
+		`module math
+fn double(x: u32) -> u32 { return add(x, x) }`,
+	)
+}
+
+func TestModuleEnforcementRootNamespaceVisible(t *testing.T) {
+	mustCompileProgram(t,
+		`fn helper() -> u32 { return 42 }`,
+		`module app
+fn main() -> unit { let x = helper() return unit }`,
+	)
+}
+
+func TestModuleEnforcementCrossModuleStructBlocked(t *testing.T) {
+	mustFailProgram(t, `"Point" is from module "geo"`,
+		`module geo
+struct Point { x: i64, y: i64 }`,
+		`module app
+fn f() -> unit { let p = Point { x: 1, y: 2 } return unit }`,
+	)
+}
+
+func TestModuleEnforcementCrossModuleStructAllowed(t *testing.T) {
+	mustCompileProgram(t,
+		`module geo
+struct Point { x: i64, y: i64 }`,
+		`module app
+use geo::Point
+fn f() -> unit { let p = Point { x: 1, y: 2 } return unit }`,
+	)
+}
+
+func TestModuleEnforcementBadUseModule(t *testing.T) {
+	mustFailProgram(t, `no symbol "Foo" found`,
+		`module app
+use nonexistent::Foo
+fn main() -> unit { return unit }`,
+	)
+}
+
+func TestModuleEnforcementBadUseSymbol(t *testing.T) {
+	mustFailProgram(t, `no symbol "NotAPoint" found`,
+		`module geo
+struct Point { x: i64, y: i64 }`,
+		`module app
+use geo::NotAPoint
+fn f() -> unit { return unit }`,
+	)
+}
+
+func TestModuleEnforcementUseRequiresPath(t *testing.T) {
+	mustFailProgram(t, "must have the form",
+		`module app
+use justname
+fn main() -> unit { return unit }`,
+	)
 }
 
 // ── module / use declarations ─────────────────────────────────────────────────

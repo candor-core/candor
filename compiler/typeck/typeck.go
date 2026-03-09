@@ -48,12 +48,15 @@ type Result struct {
 }
 
 // Check type-checks a fully parsed File and returns a Result.
+// Module declarations and use statements in the file are parsed but not
+// enforced. Use CheckProgram for multi-file programs with enforcement.
 func Check(file *parser.File) (*Result, error) {
 	c := &checker{
 		exprTypes: make(map[parser.Expr]Type),
 		fnSigs:    make(map[string]*FnType),
 		structs:   make(map[string]*StructType),
 		fnEffects: make(map[string]*parser.EffectsAnnotation),
+		// symModule intentionally nil — disables module enforcement
 	}
 	if err := c.checkFile(file); err != nil {
 		return nil, err
@@ -66,6 +69,153 @@ func Check(file *parser.File) (*Result, error) {
 	}, nil
 }
 
+// CheckProgram type-checks a multi-file program with module enforcement.
+// Each file may declare a module with `module name`. Top-level names from
+// other modules are only accessible in files that import them with `use module::Name`.
+// Files with no module declaration share the root namespace (always accessible).
+func CheckProgram(files []*parser.File) (*Result, error) {
+	c := &checker{
+		exprTypes: make(map[parser.Expr]Type),
+		fnSigs:    make(map[string]*FnType),
+		structs:   make(map[string]*StructType),
+		fnEffects: make(map[string]*parser.EffectsAnnotation),
+		symModule: make(map[string]string), // non-nil enables enforcement
+	}
+	if err := c.checkProgram(files); err != nil {
+		return nil, err
+	}
+	return &Result{
+		ExprTypes: c.exprTypes,
+		FnSigs:    c.fnSigs,
+		Structs:   c.structs,
+		FnEffects: c.fnEffects,
+	}, nil
+}
+
+func (c *checker) checkProgram(files []*parser.File) error {
+	// Inject built-in signatures (root namespace, always visible).
+	for name, sig := range Builtins {
+		c.fnSigs[name] = sig
+		c.symModule[name] = "" // builtins are root-level
+	}
+	for name, ann := range BuiltinEffects {
+		c.fnEffects[name] = ann
+	}
+
+	// Pre-pass: determine each file's declared module name.
+	fileModule := make(map[*parser.File]string)
+	for _, f := range files {
+		for _, d := range f.Decls {
+			if md, ok := d.(*parser.ModuleDecl); ok {
+				fileModule[f] = md.Name.Lexeme
+				break
+			}
+		}
+	}
+
+	// Pass 1: collect all fn/struct signatures and record which module each belongs to.
+	for _, f := range files {
+		mod := fileModule[f]
+		for _, d := range f.Decls {
+			switch decl := d.(type) {
+			case *parser.FnDecl:
+				sig, err := c.buildFnSig(decl)
+				if err != nil {
+					return err
+				}
+				c.fnSigs[decl.Name.Lexeme] = sig
+				c.symModule[decl.Name.Lexeme] = mod
+				if decl.Effects != nil {
+					c.fnEffects[decl.Name.Lexeme] = decl.Effects
+				}
+			case *parser.StructDecl:
+				st, err := c.buildStructType(decl)
+				if err != nil {
+					return err
+				}
+				c.structs[decl.Name.Lexeme] = st
+				c.symModule[decl.Name.Lexeme] = mod
+			}
+		}
+	}
+
+	// Use-validation pass: verify each UseDecl references a real module and name.
+	// Build per-file import tables.
+	fileUses := make(map[*parser.File]map[string]string)
+	for _, f := range files {
+		uses := make(map[string]string)
+		for _, d := range f.Decls {
+			ud, ok := d.(*parser.UseDecl)
+			if !ok {
+				continue
+			}
+			if len(ud.Path) < 2 {
+				return &Error{Tok: ud.UseTok, Msg: "use path must have the form 'module::Name'"}
+			}
+			// Module is the first segment; imported name is the last segment.
+			modName := ud.Path[0].Lexeme
+			symName := ud.Path[len(ud.Path)-1].Lexeme
+			// Validate: symName must exist and belong to modName.
+			declMod, exists := c.symModule[symName]
+			if !exists {
+				return &Error{Tok: ud.UseTok,
+					Msg: fmt.Sprintf("no symbol %q found in any module", symName)}
+			}
+			if declMod != modName {
+				return &Error{Tok: ud.UseTok,
+					Msg: fmt.Sprintf("symbol %q is from module %q, not %q", symName, declMod, modName)}
+			}
+			// Detect conflicting imports of the same name from different modules.
+			if prev, dup := uses[symName]; dup && prev != modName {
+				return &Error{Tok: ud.UseTok,
+					Msg: fmt.Sprintf("conflicting imports: %q already imported from %q", symName, prev)}
+			}
+			uses[symName] = modName
+		}
+		fileUses[f] = uses
+	}
+
+	// Pass 2: type-check function bodies with per-file module context.
+	for _, f := range files {
+		c.currentModule = fileModule[f]
+		c.currentUses = fileUses[f]
+		c.errs = nil
+		for _, d := range f.Decls {
+			if fn, ok := d.(*parser.FnDecl); ok {
+				if err := c.checkFnDecl(fn); err != nil {
+					c.errs = append(c.errs, err)
+				}
+			}
+		}
+		if len(c.errs) > 0 {
+			return multiError(c.errs)
+		}
+	}
+	return nil
+}
+
+// checkModuleAccess returns an error if name belongs to a different module
+// that has not been imported via `use` in the current file.
+// It is a no-op when symModule is nil (single-file / Check mode).
+func (c *checker) checkModuleAccess(name string, tok lexer.Token) error {
+	if c.symModule == nil {
+		return nil
+	}
+	symMod, known := c.symModule[name]
+	if !known {
+		return nil // not a top-level symbol at all; let the caller produce the "undefined" error
+	}
+	if symMod == "" || symMod == c.currentModule {
+		return nil // root namespace or same module — always accessible
+	}
+	// Cross-module: require an explicit use import.
+	if importedFrom, ok := c.currentUses[name]; ok && importedFrom == symMod {
+		return nil
+	}
+	return &Error{Tok: tok,
+		Msg: fmt.Sprintf("%q is from module %q; add 'use %s::%s'", name, symMod, symMod, name)}
+}
+
 // ── Internal checker state ────────────────────────────────────────────────────
 
 type checker struct {
@@ -75,6 +225,11 @@ type checker struct {
 	fnEffects  map[string]*parser.EffectsAnnotation // collected effects annotations
 	curEffects *parser.EffectsAnnotation             // effects of fn currently being checked
 	errs       []error                               // collected statement-level errors
+
+	// Module enforcement — nil in single-file (Check) mode, populated by CheckProgram.
+	symModule     map[string]string // top-level name → declaring module ("" = root/no module)
+	currentModule string            // module of the file currently being checked
+	currentUses   map[string]string // imported name → source module (for current file)
 }
 
 // scope is a linked chain of variable bindings.
@@ -232,6 +387,9 @@ func (c *checker) resolveTypeExpr(te parser.TypeExpr) (Type, error) {
 			return builtin, nil
 		}
 		if st, ok := c.structs[name]; ok {
+			if err := c.checkModuleAccess(name, t.Name); err != nil {
+				return nil, err
+			}
 			return st, nil
 		}
 		return nil, c.errorf(t.Name, "unknown type %q", name)
@@ -599,6 +757,9 @@ func (c *checker) inferIdentExpr(e *parser.IdentExpr, sc *scope) (Type, error) {
 
 	// Function name
 	if sig, ok := c.fnSigs[name]; ok {
+		if err := c.checkModuleAccess(name, e.Tok); err != nil {
+			return nil, err
+		}
 		return sig, nil
 	}
 
@@ -1164,6 +1325,9 @@ func (c *checker) inferStructLitExpr(e *parser.StructLitExpr, sc *scope) (Type, 
 	st, ok := c.structs[e.TypeName.Lexeme]
 	if !ok {
 		return nil, c.errorf(e.TypeName, "undefined struct %q", e.TypeName.Lexeme)
+	}
+	if err := c.checkModuleAccess(e.TypeName.Lexeme, e.TypeName); err != nil {
+		return nil, err
 	}
 	provided := make(map[string]bool, len(e.Fields))
 	for _, fi := range e.Fields {

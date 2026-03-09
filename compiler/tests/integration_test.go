@@ -294,6 +294,7 @@ func compileMulti(t *testing.T, dir, name string, srcs map[string]string) string
 			}
 		}
 	}
+	files := make([]*parser.File, 0, len(keys))
 	for _, k := range keys {
 		src := srcs[k]
 		fakePath := filepath.Join(dir, k+".cnd")
@@ -308,17 +309,18 @@ func compileMulti(t *testing.T, dir, name string, srcs map[string]string) string
 		if err != nil {
 			t.Fatalf("parse %s: %v", k, err)
 		}
+		files = append(files, file)
 		allDecls = append(allDecls, file.Decls...)
 		if firstName == "" {
 			firstName = fakePath
 		}
 	}
 
-	merged := &parser.File{Name: firstName, Decls: allDecls}
-	res, err := typeck.Check(merged)
+	res, err := typeck.CheckProgram(files)
 	if err != nil {
 		t.Fatalf("typeck: %v", err)
 	}
+	merged := &parser.File{Name: firstName, Decls: allDecls}
 	cSrc, err := emit_c.Emit(merged, res)
 	if err != nil {
 		t.Fatalf("emit: %v", err)
@@ -586,6 +588,40 @@ fn main() -> unit {
 	got := strings.ReplaceAll(string(out), "\r\n", "\n")
 	if got != "true\n" {
 		t.Errorf("stdout: got %q, want %q", got, "true\n")
+	}
+}
+
+// TestMultiFileModuleProgram verifies that a two-file program with module
+// declarations and use imports compiles and produces the right output.
+func TestMultiFileModuleProgram(t *testing.T) {
+	skipIfNoCC(t)
+
+	srcs := map[string]string{
+		"a_math": `
+module math
+fn add(a: i64, b: i64) -> i64 { return a + b }
+fn mul(a: i64, b: i64) -> i64 { return a * b }
+`,
+		"b_main": `
+module app
+use math::add
+use math::mul
+fn main() -> unit {
+    print_int(add(3, 4))
+    print_int(mul(3, 4))
+    return unit
+}
+`,
+	}
+	dir := t.TempDir()
+	bin := compileMulti(t, dir, "multimod", srcs)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("binary failed: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "7\n12\n" {
+		t.Errorf("stdout: got %q, want %q", got, "7\n12\n")
 	}
 }
 

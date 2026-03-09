@@ -29,8 +29,8 @@ func main() {
 }
 
 func run(srcPaths []string) error {
-	// Parse all files, merge declarations.
-	var allDecls []parser.Decl
+	// Parse all files individually.
+	files := make([]*parser.File, 0, len(srcPaths))
 	for _, srcPath := range srcPaths {
 		src, err := os.ReadFile(srcPath)
 		if err != nil {
@@ -44,15 +44,21 @@ func run(srcPaths []string) error {
 		if err != nil {
 			return err
 		}
-		allDecls = append(allDecls, file.Decls...)
+		files = append(files, file)
 	}
 
-	// Type-check the merged program.
-	merged := &parser.File{Name: srcPaths[0], Decls: allDecls}
-	res, err := typeck.Check(merged)
+	// Type-check with module enforcement.
+	res, err := typeck.CheckProgram(files)
 	if err != nil {
 		return err
 	}
+
+	// Merge declarations for the emitter (single C translation unit).
+	var allDecls []parser.Decl
+	for _, f := range files {
+		allDecls = append(allDecls, f.Decls...)
+	}
+	merged := &parser.File{Name: srcPaths[0], Decls: allDecls}
 
 	// Emit a single C file.
 	cSrc, err := emit_c.Emit(merged, res)
