@@ -289,6 +289,29 @@ func TestMatchOnBool(t *testing.T) {
 	assertContains(t, out, "if (")
 }
 
+// ── effects annotations ───────────────────────────────────────────────────────
+
+func TestPureComment(t *testing.T) {
+	out := pipeline(t, `fn add(a: u32, b: u32) -> u32 pure { return a + b }`)
+	assertContains(t, out, "/* pure */")
+}
+
+func TestEffectsComment(t *testing.T) {
+	out := pipeline(t, `fn log(s: str) -> unit effects(io) { print(s) return unit }`)
+	assertContains(t, out, "/* effects: io */")
+}
+
+func TestEffectsMultipleComment(t *testing.T) {
+	out := pipeline(t, `fn fetch(url: str) -> str effects(io, net) { return url }`)
+	assertContains(t, out, "/* effects: io, net */")
+}
+
+func TestNoAnnotationNoComment(t *testing.T) {
+	out := pipeline(t, `fn f() -> unit { return unit }`)
+	assertNotContains(t, out, "/* pure */")
+	assertNotContains(t, out, "/* effects")
+}
+
 // ── field assignment ──────────────────────────────────────────────────────────
 
 func TestFieldAssign(t *testing.T) {

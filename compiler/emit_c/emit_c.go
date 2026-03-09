@@ -207,7 +207,20 @@ func (e *emitter) emitFnDecl(d *parser.FnDecl) error {
 		return err
 	}
 
-	e.writef("\n%s {\n", proto)
+	// Emit effects annotation as a C comment before the definition.
+	if ann := e.res.FnEffects[d.Name.Lexeme]; ann != nil {
+		switch ann.Kind {
+		case parser.EffectsPure:
+			e.writeln("\n/* pure */")
+		case parser.EffectsDecl:
+			e.writef("\n/* effects: %s */\n", strings.Join(ann.Names, ", "))
+		case parser.EffectsCap:
+			e.writef("\n/* cap: %s */\n", strings.Join(ann.Names, ", "))
+		}
+		e.writef("%s {\n", proto)
+	} else {
+		e.writef("\n%s {\n", proto)
+	}
 
 	sig := e.res.FnSigs[d.Name.Lexeme]
 	// Save and set function context.

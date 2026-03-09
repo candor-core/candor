@@ -417,6 +417,51 @@ fn main() -> unit {
 	}
 }
 
+// TestPureProgram verifies a pure function compiles and the binary runs.
+func TestPureProgram(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn twice(n: u32) -> u32 pure { return n + n }
+fn quad(n: u32) -> u32 pure { return twice(twice(n)) }
+fn main() -> unit {
+    print_u32(quad(3))
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "pure_fn", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("binary failed: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "12\n" {
+		t.Errorf("stdout: got %q, want %q", got, "12\n")
+	}
+}
+
+// TestEffectsIoProgram verifies an effects(io) function compiles and runs.
+func TestEffectsIoProgram(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn greet(name: str) -> unit effects(io) { print(name) return unit }
+fn main() -> unit {
+    greet("candor")
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "effects_io", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("binary failed: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "candor\n" {
+		t.Errorf("stdout: got %q, want %q", got, "candor\n")
+	}
+}
+
 // TestFieldAssignProgram verifies struct field mutation compiles and runs.
 // A helper copies the struct and mutates the copy; main just calls it.
 func TestFieldAssignProgram(t *testing.T) {

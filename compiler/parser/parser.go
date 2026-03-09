@@ -171,6 +171,10 @@ func (p *parser) parseFnDecl() (*FnDecl, error) {
 	if err != nil {
 		return nil, err
 	}
+	effects, err := p.parseEffects()
+	if err != nil {
+		return nil, err
+	}
 	body, err := p.parseBlock()
 	if err != nil {
 		return nil, err
@@ -180,8 +184,63 @@ func (p *parser) parseFnDecl() (*FnDecl, error) {
 		Name:    nameTok,
 		Params:  params,
 		RetType: retType,
+		Effects: effects,
 		Body:    body,
 	}, nil
+}
+
+// parseEffects parses an optional pure / effects(...) / cap(...) clause.
+// Returns nil if the next token is not an effects keyword.
+func (p *parser) parseEffects() (*EffectsAnnotation, error) {
+	switch p.peekType() {
+	case lexer.TokPure:
+		p.advance()
+		return &EffectsAnnotation{Kind: EffectsPure}, nil
+
+	case lexer.TokEffects:
+		tok := p.advance()
+		if _, err := p.expect(lexer.TokLParen); err != nil {
+			return nil, err
+		}
+		var names []string
+		for !p.check(lexer.TokRParen) && !p.check(lexer.TokEOF) {
+			if len(names) > 0 {
+				if _, err := p.expect(lexer.TokComma); err != nil {
+					return nil, err
+				}
+			}
+			if p.check(lexer.TokRParen) {
+				break // trailing comma
+			}
+			name, err := p.expect(lexer.TokIdent)
+			if err != nil {
+				return nil, err
+			}
+			names = append(names, name.Lexeme)
+		}
+		if _, err := p.expect(lexer.TokRParen); err != nil {
+			return nil, err
+		}
+		if len(names) == 0 {
+			return nil, p.errorf(tok, "effects() requires at least one effect name")
+		}
+		return &EffectsAnnotation{Kind: EffectsDecl, Names: names}, nil
+
+	case lexer.TokCap:
+		p.advance()
+		if _, err := p.expect(lexer.TokLParen); err != nil {
+			return nil, err
+		}
+		capName, err := p.expect(lexer.TokIdent)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.TokRParen); err != nil {
+			return nil, err
+		}
+		return &EffectsAnnotation{Kind: EffectsCap, Names: []string{capName.Lexeme}}, nil
+	}
+	return nil, nil // no annotation
 }
 
 func (p *parser) parseParams() ([]Param, error) {

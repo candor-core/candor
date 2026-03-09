@@ -438,6 +438,63 @@ func TestMatchExpr(t *testing.T) {
 	}
 }
 
+// ── Effects annotations ───────────────────────────────────────────────────────
+
+func TestPureAnnotation(t *testing.T) {
+	file := parse(t, `fn add(a: u32, b: u32) -> u32 pure { return a + b }`)
+	fn := file.Decls[0].(*FnDecl)
+	if fn.Effects == nil {
+		t.Fatal("expected Effects != nil")
+	}
+	if fn.Effects.Kind != EffectsPure {
+		t.Errorf("kind: want EffectsPure, got %v", fn.Effects.Kind)
+	}
+}
+
+func TestEffectsAnnotation(t *testing.T) {
+	file := parse(t, `fn log(s: str) -> unit effects(io) { return unit }`)
+	fn := file.Decls[0].(*FnDecl)
+	if fn.Effects == nil {
+		t.Fatal("expected Effects != nil")
+	}
+	if fn.Effects.Kind != EffectsDecl {
+		t.Errorf("kind: want EffectsDecl, got %v", fn.Effects.Kind)
+	}
+	if len(fn.Effects.Names) != 1 || fn.Effects.Names[0] != "io" {
+		t.Errorf("names: want [io], got %v", fn.Effects.Names)
+	}
+}
+
+func TestEffectsMultiple(t *testing.T) {
+	file := parse(t, `fn fetch(url: str) -> str effects(io, net) { return url }`)
+	fn := file.Decls[0].(*FnDecl)
+	if fn.Effects == nil || fn.Effects.Kind != EffectsDecl {
+		t.Fatal("expected EffectsDecl annotation")
+	}
+	if len(fn.Effects.Names) != 2 {
+		t.Errorf("want 2 effect names, got %v", fn.Effects.Names)
+	}
+}
+
+func TestCapAnnotation(t *testing.T) {
+	file := parse(t, `fn privileged() -> unit cap(Admin) { return unit }`)
+	fn := file.Decls[0].(*FnDecl)
+	if fn.Effects == nil || fn.Effects.Kind != EffectsCap {
+		t.Fatal("expected EffectsCap annotation")
+	}
+	if fn.Effects.Names[0] != "Admin" {
+		t.Errorf("cap name: want Admin, got %q", fn.Effects.Names[0])
+	}
+}
+
+func TestNoAnnotation(t *testing.T) {
+	file := parse(t, `fn f() -> unit { return unit }`)
+	fn := file.Decls[0].(*FnDecl)
+	if fn.Effects != nil {
+		t.Errorf("want nil Effects, got %v", fn.Effects)
+	}
+}
+
 // ── Field assignment ──────────────────────────────────────────────────────────
 
 func TestFieldAssignStmt(t *testing.T) {

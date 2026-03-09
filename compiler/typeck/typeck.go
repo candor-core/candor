@@ -42,6 +42,8 @@ type Result struct {
 	FnSigs map[string]*FnType
 	// Structs maps struct names to their StructType.
 	Structs map[string]*StructType
+	// FnEffects maps function names to their effects annotation (may be nil).
+	FnEffects map[string]*parser.EffectsAnnotation
 }
 
 // Check type-checks a fully parsed File and returns a Result.
@@ -50,6 +52,7 @@ func Check(file *parser.File) (*Result, error) {
 		exprTypes: make(map[parser.Expr]Type),
 		fnSigs:    make(map[string]*FnType),
 		structs:   make(map[string]*StructType),
+		fnEffects: make(map[string]*parser.EffectsAnnotation),
 	}
 	if err := c.checkFile(file); err != nil {
 		return nil, err
@@ -58,6 +61,7 @@ func Check(file *parser.File) (*Result, error) {
 		ExprTypes: c.exprTypes,
 		FnSigs:    c.fnSigs,
 		Structs:   c.structs,
+		FnEffects: c.fnEffects,
 	}, nil
 }
 
@@ -67,6 +71,8 @@ type checker struct {
 	exprTypes map[parser.Expr]Type
 	fnSigs    map[string]*FnType
 	structs   map[string]*StructType
+	fnEffects map[string]*parser.EffectsAnnotation // collected effects annotations
+	curEffects *parser.EffectsAnnotation            // effects of fn currently being checked
 }
 
 // scope is a linked chain of variable bindings.
@@ -133,11 +139,25 @@ var Builtins = map[string]*FnType{
 	"print_f64":  {Params: []Type{TF64}, Ret: TUnit},
 }
 
+// BuiltinEffects records the known effects of built-in functions.
+// The print_* family performs I/O, so they carry effects(io).
+var BuiltinEffects = map[string]*parser.EffectsAnnotation{
+	"print":      {Kind: parser.EffectsDecl, Names: []string{"io"}},
+	"print_int":  {Kind: parser.EffectsDecl, Names: []string{"io"}},
+	"print_bool": {Kind: parser.EffectsDecl, Names: []string{"io"}},
+	"print_u32":  {Kind: parser.EffectsDecl, Names: []string{"io"}},
+	"print_f64":  {Kind: parser.EffectsDecl, Names: []string{"io"}},
+}
+
 func (c *checker) checkFile(file *parser.File) error {
-	// Inject built-in signatures first so user code can call them.
+	// Inject built-in signatures and their known effects.
 	for name, sig := range Builtins {
 		c.fnSigs[name] = sig
 	}
+	for name, ann := range BuiltinEffects {
+		c.fnEffects[name] = ann
+	}
+	// Pass 1: collect struct types, function signatures, and effects annotations.
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *parser.FnDecl:
@@ -146,6 +166,9 @@ func (c *checker) checkFile(file *parser.File) error {
 				return err
 			}
 			c.fnSigs[d.Name.Lexeme] = sig
+			if d.Effects != nil {
+				c.fnEffects[d.Name.Lexeme] = d.Effects
+			}
 		case *parser.StructDecl:
 			st, err := c.buildStructType(d)
 			if err != nil {
@@ -154,6 +177,7 @@ func (c *checker) checkFile(file *parser.File) error {
 			c.structs[d.Name.Lexeme] = st
 		}
 	}
+	// Pass 2: type-check function bodies.
 	for _, decl := range file.Decls {
 		if d, ok := decl.(*parser.FnDecl); ok {
 			if err := c.checkFnDecl(d); err != nil {
@@ -243,7 +267,12 @@ func (c *checker) checkFnDecl(d *parser.FnDecl) error {
 	for i, p := range d.Params {
 		sc.define(p.Name.Lexeme, sig.Params[i])
 	}
-	return c.checkBlock(d.Body, sc, sig.Ret)
+	// Set the current function's effects for callee-checking within the body.
+	prev := c.curEffects
+	c.curEffects = c.fnEffects[d.Name.Lexeme] // nil if unannotated
+	err := c.checkBlock(d.Body, sc, sig.Ret)
+	c.curEffects = prev
+	return err
 }
 
 func (c *checker) checkBlock(block *parser.BlockStmt, sc *scope, retType Type) error {
@@ -651,6 +680,12 @@ func (c *checker) inferCallExpr(e *parser.CallExpr, sc *scope) (Type, error) {
 	if !ok {
 		return nil, c.errorf(e.Fn.Pos(), "cannot call non-function type %s", fnType)
 	}
+	// Effects compatibility check.
+	if ident, ok2 := e.Fn.(*parser.IdentExpr); ok2 {
+		if err := c.checkEffectsCompat(ident.Tok, ident.Tok.Lexeme); err != nil {
+			return nil, err
+		}
+	}
 	if len(e.Args) != len(sig.Params) {
 		return nil, c.errorf(e.LParen,
 			"argument count mismatch: expected %d, got %d", len(sig.Params), len(e.Args))
@@ -668,6 +703,50 @@ func (c *checker) inferCallExpr(e *parser.CallExpr, sc *scope) (Type, error) {
 		c.exprTypes[arg] = coerced
 	}
 	return sig.Ret, nil
+}
+
+// checkEffectsCompat enforces that callee's effects are compatible with the
+// current function's declared effects.
+//
+//   - Caller unannotated (curEffects == nil): no check — gradual adoption.
+//   - Caller pure: callee must also be pure (or unannotated ≡ trusted).
+//   - Caller effects(X): callee's effects must be ⊆ X (unannotated = trusted).
+func (c *checker) checkEffectsCompat(callTok lexer.Token, calleeName string) error {
+	if c.curEffects == nil || c.curEffects.Kind == parser.EffectsNone {
+		return nil
+	}
+	calleeEff := c.fnEffects[calleeName]
+	if calleeEff == nil {
+		return nil // callee unannotated — trusted
+	}
+
+	switch c.curEffects.Kind {
+	case parser.EffectsPure:
+		if calleeEff.Kind != parser.EffectsPure {
+			return c.errorf(callTok,
+				"pure function cannot call %q which has effects %v",
+				calleeName, calleeEff.Names)
+		}
+
+	case parser.EffectsDecl:
+		if calleeEff.Kind == parser.EffectsPure {
+			return nil
+		}
+		if calleeEff.Kind == parser.EffectsDecl {
+			allowed := make(map[string]bool, len(c.curEffects.Names))
+			for _, e := range c.curEffects.Names {
+				allowed[e] = true
+			}
+			for _, e := range calleeEff.Names {
+				if !allowed[e] {
+					return c.errorf(callTok,
+						"function with effects(%v) cannot call %q which requires effect %q",
+						c.curEffects.Names, calleeName, e)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func (c *checker) inferFieldExpr(e *parser.FieldExpr, sc *scope) (Type, error) {

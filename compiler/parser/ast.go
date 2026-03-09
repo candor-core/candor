@@ -27,12 +27,13 @@ type Decl interface {
 	declNode()
 }
 
-// FnDecl: fn name(params) -> RetType { body }
+// FnDecl: fn name(params) -> RetType [pure | effects(...) | cap(...)] { body }
 type FnDecl struct {
 	FnTok   lexer.Token
 	Name    lexer.Token
 	Params  []Param
 	RetType TypeExpr
+	Effects *EffectsAnnotation // nil = no annotation (unchecked)
 	Body    *BlockStmt
 }
 
@@ -271,6 +272,24 @@ type ReturnExpr struct {
 
 func (e *ReturnExpr) Pos() lexer.Token { return e.ReturnTok }
 func (e *ReturnExpr) exprNode()        {}
+
+// ── Effects annotations ────────────────────────────────────────────────────────
+
+// EffectsKind classifies a function's effects annotation.
+type EffectsKind uint8
+
+const (
+	EffectsNone EffectsKind = iota // no annotation — unchecked
+	EffectsPure                    // pure
+	EffectsDecl                    // effects(io, net, ...)
+	EffectsCap                     // cap(SomeCap)
+)
+
+// EffectsAnnotation holds the parsed effects or capability clause on a fn.
+type EffectsAnnotation struct {
+	Kind  EffectsKind
+	Names []string // effect labels (EffectsDecl) or single cap name (EffectsCap)
+}
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 

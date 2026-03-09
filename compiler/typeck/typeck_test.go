@@ -304,6 +304,56 @@ func TestAssignToImmutable(t *testing.T) {
 		"cannot assign to immutable")
 }
 
+// ── effects layer ─────────────────────────────────────────────────────────────
+
+func TestPureFnCompiles(t *testing.T) {
+	mustCompile(t, `fn add(a: u32, b: u32) -> u32 pure { return a + b }`)
+}
+
+func TestEffectsFnCompiles(t *testing.T) {
+	mustCompile(t, `fn log(s: str) -> unit effects(io) { print(s) return unit }`)
+}
+
+func TestPureCannotCallIo(t *testing.T) {
+	mustFail(t, `
+fn add(a: u32, b: u32) -> u32 pure {
+    print_u32(a)
+    return a + b
+}`, "pure function cannot call")
+}
+
+func TestEffectsSubset(t *testing.T) {
+	// effects(io) can call effects(io) — equal set is fine
+	mustCompile(t, `
+fn log(s: str) -> unit effects(io) { print(s) return unit }
+fn run() -> unit effects(io) { log("hi") return unit }
+`)
+}
+
+func TestEffectsSubsetViolation(t *testing.T) {
+	// effects(io) cannot call something that needs net
+	mustFail(t, `
+fn fetch() -> unit effects(net) { return unit }
+fn run() -> unit effects(io) { fetch() return unit }
+`, "cannot call")
+}
+
+func TestPureCallingPure(t *testing.T) {
+	mustCompile(t, `
+fn twice(n: u32) -> u32 pure { return n + n }
+fn quad(n: u32) -> u32 pure { return twice(twice(n)) }
+`)
+}
+
+func TestUnannotatedCanCallAnything(t *testing.T) {
+	// No annotation = unchecked; can call effects(io) freely
+	mustCompile(t, `
+fn main() -> unit {
+    print_u32(42)
+    return unit
+}`)
+}
+
 // ── struct field assignment ───────────────────────────────────────────────────
 
 func TestFieldAssign(t *testing.T) {
