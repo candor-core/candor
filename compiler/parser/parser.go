@@ -866,7 +866,7 @@ func (p *parser) parsePrimaryExpr() (Expr, error) {
 	case lexer.TokTrue, lexer.TokFalse:
 		p.advance()
 		return &BoolLitExpr{Tok: t}, nil
-	case lexer.TokIdent:
+	case lexer.TokIdent, lexer.TokUScore:
 		p.advance()
 		return &IdentExpr{Tok: t}, nil
 	// These keywords also appear as expression values.

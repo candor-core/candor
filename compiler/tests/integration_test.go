@@ -911,3 +911,126 @@ fn main() -> unit {
 		t.Fatalf("got %q, want %q", got, "100\n200\n300\n")
 	}
 }
+
+// ── String operations ─────────────────────────────────────────────────────────
+
+func TestStrLen(t *testing.T) {
+	skipIfNoCC(t)
+	dir := t.TempDir()
+	src := `
+fn main() -> unit {
+    print_int(str_len("hello"))
+    print_int(str_len(""))
+    return unit
+}
+`
+	bin := compile(t, dir, "str_len", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "5\n0\n" {
+		t.Fatalf("got %q, want %q", got, "5\n0\n")
+	}
+}
+
+func TestStrConcat(t *testing.T) {
+	skipIfNoCC(t)
+	dir := t.TempDir()
+	src := `
+fn main() -> unit {
+    let s = str_concat("hello", ", world")
+    print(s)
+    return unit
+}
+`
+	bin := compile(t, dir, "str_concat", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "hello, world\n" {
+		t.Fatalf("got %q, want %q", got, "hello, world\n")
+	}
+}
+
+func TestIntToStr(t *testing.T) {
+	skipIfNoCC(t)
+	dir := t.TempDir()
+	src := `
+fn main() -> unit {
+    let s = int_to_str(42)
+    print(s)
+    let s2 = int_to_str(-7)
+    print(s2)
+    return unit
+}
+`
+	bin := compile(t, dir, "int_to_str", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "42\n-7\n" {
+		t.Fatalf("got %q, want %q", got, "42\n-7\n")
+	}
+}
+
+func TestStrToInt(t *testing.T) {
+	skipIfNoCC(t)
+	dir := t.TempDir()
+	src := `
+fn main() -> unit {
+    let a = str_to_int("123") must {
+        ok(v)  => v
+        err(_) => 0
+    }
+    print_int(a)
+    let b = str_to_int("bad") must {
+        ok(v)  => v
+        err(_) => -1
+    }
+    print_int(b)
+    return unit
+}
+`
+	bin := compile(t, dir, "str_to_int", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "123\n-1\n" {
+		t.Fatalf("got %q, want %q", got, "123\n-1\n")
+	}
+}
+
+func TestStrEqOperator(t *testing.T) {
+	skipIfNoCC(t)
+	dir := t.TempDir()
+	src := `
+fn main() -> unit {
+    let s = read_line()
+    if s == "hello" {
+        print("yes")
+        return unit
+    }
+    print("no")
+    return unit
+}
+`
+	bin := compile(t, dir, "str_eq_op", src)
+	cmd := exec.Command(bin)
+	cmd.Stdin = strings.NewReader("hello\n")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "yes\n" {
+		t.Fatalf("got %q, want %q", got, "yes\n")
+	}
+}

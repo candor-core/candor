@@ -780,6 +780,24 @@ func (e *emitter) emitExpr(expr parser.Expr, sb *strings.Builder) error {
 		}
 
 	case *parser.BinaryExpr:
+		// String == and != must use strcmp, not pointer comparison.
+		if ex.Op.Type == lexer.TokEqEq || ex.Op.Type == lexer.TokBangEq {
+			if ltype := e.res.ExprTypes[ex.Left]; ltype != nil && ltype.Equals(typeck.TStr) {
+				var lsb, rsb strings.Builder
+				if err := e.emitExpr(ex.Left, &lsb); err != nil {
+					return err
+				}
+				if err := e.emitExpr(ex.Right, &rsb); err != nil {
+					return err
+				}
+				if ex.Op.Type == lexer.TokEqEq {
+					sb.WriteString(fmt.Sprintf("(strcmp(%s, %s) == 0)", lsb.String(), rsb.String()))
+				} else {
+					sb.WriteString(fmt.Sprintf("(strcmp(%s, %s) != 0)", lsb.String(), rsb.String()))
+				}
+				break
+			}
+		}
 		op := ex.Op.Lexeme
 		switch ex.Op.Type {
 		case lexer.TokAnd:
@@ -998,6 +1016,34 @@ func (e *emitter) emitBuiltinCall(name string, args []parser.Expr, sb *strings.B
 		}
 	}
 
+	// Two-argument string builtins.
+	if len(args) == 2 {
+		switch name {
+		case "str_concat":
+			sb.WriteString("_cnd_str_concat(")
+			if err := e.emitExpr(args[0], sb); err != nil {
+				return true, err
+			}
+			sb.WriteString(", ")
+			if err := e.emitExpr(args[1], sb); err != nil {
+				return true, err
+			}
+			sb.WriteByte(')')
+			return true, nil
+		case "str_eq":
+			sb.WriteString("(strcmp(")
+			if err := e.emitExpr(args[0], sb); err != nil {
+				return true, err
+			}
+			sb.WriteString(", ")
+			if err := e.emitExpr(args[1], sb); err != nil {
+				return true, err
+			}
+			sb.WriteString(") == 0)")
+			return true, nil
+		}
+	}
+
 	if len(args) != 1 {
 		return false, nil
 	}
@@ -1028,6 +1074,33 @@ func (e *emitter) emitBuiltinCall(name string, args []parser.Expr, sb *strings.B
 		sb.WriteString(") ? \"true\" : \"false\")")
 	case "print_f64":
 		sb.WriteString("printf(\"%f\\n\", ")
+		if err := e.emitExpr(args[0], sb); err != nil {
+			return true, err
+		}
+		sb.WriteByte(')')
+	case "str_len":
+		sb.WriteString("(int64_t)strlen(")
+		if err := e.emitExpr(args[0], sb); err != nil {
+			return true, err
+		}
+		sb.WriteByte(')')
+	case "str_to_int":
+		resType := &typeck.GenType{Con: "result", Params: []typeck.Type{typeck.TI64, typeck.TStr}}
+		structName, err := e.resultTypeName(resType)
+		if err != nil {
+			return true, err
+		}
+		var argSB strings.Builder
+		if err := e.emitExpr(args[0], &argSB); err != nil {
+			return true, err
+		}
+		arg := argSB.String()
+		sb.WriteString(fmt.Sprintf(
+			"(__extension__ ({ char* _end; int64_t _v = (int64_t)strtoll(%s, &_end, 10); "+
+				"(*_end == '\\0') ? (%s){ ._ok=1, ._ok_val=_v } : (%s){ ._ok=0, ._err_val=\"invalid integer\" }; }))",
+			arg, structName, structName))
+	case "int_to_str":
+		sb.WriteString("_cnd_int_to_str(")
 		if err := e.emitExpr(args[0], sb); err != nil {
 			return true, err
 		}
@@ -1083,6 +1156,24 @@ func (e *emitter) emitRuntimeHelpers() {
 	e.writeln("    double* _p = (double*)malloc(sizeof(double));")
 	e.writeln("    *_p = _v;")
 	e.writeln("    return _p;")
+	e.writeln("}")
+
+	// str_concat: allocate a new string that is a + b.
+	e.writeln("static const char* _cnd_str_concat(const char* a, const char* b) {")
+	e.writeln("    size_t la = strlen(a), lb = strlen(b);")
+	e.writeln("    char* _out = (char*)malloc(la + lb + 1);")
+	e.writeln("    memcpy(_out, a, la);")
+	e.writeln("    memcpy(_out + la, b, lb + 1);")
+	e.writeln("    return _out;")
+	e.writeln("}")
+
+	// int_to_str: convert i64 to a decimal string.
+	e.writeln("static const char* _cnd_int_to_str(int64_t n) {")
+	e.writeln("    char _buf[32];")
+	e.writeln("    snprintf(_buf, sizeof(_buf), \"%lld\", (long long)n);")
+	e.writeln("    char* _out = (char*)malloc(strlen(_buf) + 1);")
+	e.writeln("    strcpy(_out, _buf);")
+	e.writeln("    return _out;")
 	e.writeln("}")
 }
 

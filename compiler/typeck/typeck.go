@@ -302,6 +302,12 @@ var Builtins = map[string]*FnType{
 	"try_read_line": {Params: []Type{}, Ret: &GenType{Con: "option", Params: []Type{TStr}}},
 	"try_read_int":  {Params: []Type{}, Ret: &GenType{Con: "option", Params: []Type{TI64}}},
 	"try_read_f64":  {Params: []Type{}, Ret: &GenType{Con: "option", Params: []Type{TF64}}},
+	// String operations
+	"str_len":    {Params: []Type{TStr}, Ret: TI64},
+	"str_concat": {Params: []Type{TStr, TStr}, Ret: TStr},
+	"str_eq":     {Params: []Type{TStr, TStr}, Ret: TBool},
+	"int_to_str": {Params: []Type{TI64}, Ret: TStr},
+	"str_to_int": {Params: []Type{TStr}, Ret: &GenType{Con: "result", Params: []Type{TI64, TStr}}},
 }
 
 // BuiltinEffects records the known effects of built-in functions.

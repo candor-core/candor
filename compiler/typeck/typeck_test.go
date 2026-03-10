@@ -937,3 +937,76 @@ fn main() -> unit {
     return unit
 }`)
 }
+
+// ── String operations ─────────────────────────────────────────────────────────
+
+func TestStrLen(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let n: i64 = str_len("hello")
+    return unit
+}`)
+}
+
+func TestStrConcat(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let s: str = str_concat("hello", " world")
+    print(s)
+    return unit
+}`)
+}
+
+func TestStrEq(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let b: bool = str_eq("foo", "foo")
+    print_bool(b)
+    return unit
+}`)
+}
+
+func TestIntToStr(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let s: str = int_to_str(42)
+    print(s)
+    return unit
+}`)
+}
+
+func TestStrToInt(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let r: result<i64, str> = str_to_int("42")
+    let n = r must {
+        ok(v)  => v
+        err(_) => 0
+    }
+    print_int(n)
+    return unit
+}`)
+}
+
+func TestStrEqOperator(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let s = read_line()
+    if s == "quit" { return unit }
+    print(s)
+    return unit
+}`)
+}
+
+func TestStrToIntBadInput(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let r = str_to_int("not_a_number")
+    let n = r must {
+        ok(v)  => v
+        err(_) => -1
+    }
+    print_int(n)
+    return unit
+}`)
+}
