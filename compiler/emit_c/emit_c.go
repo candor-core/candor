@@ -66,6 +66,8 @@ func (e *emitter) emitFile(file *parser.File) error {
 	e.writeln("#include <string.h>")
 	e.writeln("#include <assert.h>")
 	e.writeln("")
+	e.emitRuntimeHelpers()
+	e.writeln("")
 
 	// Emit result<T,E> struct typedefs used in this file.
 	if err := e.emitResultStructs(); err != nil {
@@ -955,6 +957,21 @@ func (e *emitter) emitBuiltinCall(name string, args []parser.Expr, sb *strings.B
 		return true, nil
 	}
 
+	// Zero-argument stdin builtins.
+	if len(args) == 0 {
+		switch name {
+		case "read_line":
+			sb.WriteString("_cnd_read_line()")
+			return true, nil
+		case "read_int":
+			sb.WriteString("(__extension__ ({ int64_t _v; scanf(\"%lld\", &_v); _v; }))")
+			return true, nil
+		case "read_f64":
+			sb.WriteString("(__extension__ ({ double _v; scanf(\"%lf\", &_v); _v; }))")
+			return true, nil
+		}
+	}
+
 	if len(args) != 1 {
 		return false, nil
 	}
@@ -993,6 +1010,23 @@ func (e *emitter) emitBuiltinCall(name string, args []parser.Expr, sb *strings.B
 		return false, nil
 	}
 	return true, nil
+}
+
+// ── runtime helpers ───────────────────────────────────────────────────────────
+
+// emitRuntimeHelpers emits small C helper functions that back Candor builtins.
+// They are emitted once at the top of the translation unit.
+func (e *emitter) emitRuntimeHelpers() {
+	// read_line: read one line from stdin, strip trailing \r\n, return heap copy.
+	e.writeln("static const char* _cnd_read_line(void) {")
+	e.writeln("    static char _buf[4096];")
+	e.writeln("    if (!fgets(_buf, sizeof(_buf), stdin)) { _buf[0] = '\\0'; }")
+	e.writeln("    size_t _n = strlen(_buf);")
+	e.writeln("    while (_n > 0 && (_buf[_n-1] == '\\n' || _buf[_n-1] == '\\r')) { _buf[--_n] = '\\0'; }")
+	e.writeln("    char* _out = (char*)malloc(_n + 1);")
+	e.writeln("    memcpy(_out, _buf, _n + 1);")
+	e.writeln("    return _out;")
+	e.writeln("}")
 }
 
 // ── constructor emission ──────────────────────────────────────────────────────

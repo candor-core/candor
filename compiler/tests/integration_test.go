@@ -772,3 +772,75 @@ fn main() -> unit {
 		t.Fatalf("got %q, want %q", got, "1\n2\n0\n")
 	}
 }
+
+// ── stdin I/O builtins ────────────────────────────────────────────────────────
+
+func TestReadLineEcho(t *testing.T) {
+	skipIfNoCC(t)
+	dir := t.TempDir()
+	src := `
+fn main() -> unit {
+    let s = read_line()
+    print(s)
+    return unit
+}
+`
+	bin := compile(t, dir, "read_line_echo", src)
+	cmd := exec.Command(bin)
+	cmd.Stdin = strings.NewReader("hello candor\n")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "hello candor\n" {
+		t.Fatalf("got %q, want %q", got, "hello candor\n")
+	}
+}
+
+func TestReadIntDouble(t *testing.T) {
+	skipIfNoCC(t)
+	dir := t.TempDir()
+	src := `
+fn main() -> unit {
+    let n = read_int()
+    print_int(n * 2)
+    return unit
+}
+`
+	bin := compile(t, dir, "read_int_double", src)
+	cmd := exec.Command(bin)
+	cmd.Stdin = strings.NewReader("21\n")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "42\n" {
+		t.Fatalf("got %q, want %q", got, "42\n")
+	}
+}
+
+func TestReadMultipleLines(t *testing.T) {
+	skipIfNoCC(t)
+	dir := t.TempDir()
+	src := `
+fn main() -> unit {
+    let a = read_int()
+    let b = read_int()
+    print_int(a + b)
+    return unit
+}
+`
+	bin := compile(t, dir, "read_multi", src)
+	cmd := exec.Command(bin)
+	cmd.Stdin = strings.NewReader("10\n32\n")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "42\n" {
+		t.Fatalf("got %q, want %q", got, "42\n")
+	}
+}

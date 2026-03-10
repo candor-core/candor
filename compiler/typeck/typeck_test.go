@@ -847,3 +847,48 @@ fn sign(n: i64) -> i64 {
 }
 fn main() -> unit { return unit }`)
 }
+
+// ── stdin I/O builtins ────────────────────────────────────────────────────────
+
+func TestReadLineType(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let s: str = read_line()
+    return unit
+}`)
+}
+
+func TestReadIntType(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let n: i64 = read_int()
+    return unit
+}`)
+}
+
+func TestReadF64Type(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let x: f64 = read_f64()
+    return unit
+}`)
+}
+
+func TestReadLineUsedInExpr(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let s = read_line()
+    print(s)
+    return unit
+}`)
+}
+
+func TestReadIntUsedInArith(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let n = read_int()
+    let doubled = n * 2
+    print_int(doubled)
+    return unit
+}`)
+}

@@ -294,6 +294,10 @@ var Builtins = map[string]*FnType{
 	"print_bool": {Params: []Type{TBool}, Ret: TUnit},
 	"print_u32":  {Params: []Type{TU32}, Ret: TUnit},
 	"print_f64":  {Params: []Type{TF64}, Ret: TUnit},
+	// stdin I/O
+	"read_line": {Params: []Type{}, Ret: TStr},
+	"read_int":  {Params: []Type{}, Ret: TI64},
+	"read_f64":  {Params: []Type{}, Ret: TF64},
 }
 
 // BuiltinEffects records the known effects of built-in functions.
@@ -304,6 +308,9 @@ var BuiltinEffects = map[string]*parser.EffectsAnnotation{
 	"print_bool": {Kind: parser.EffectsDecl, Names: []string{"io"}},
 	"print_u32":  {Kind: parser.EffectsDecl, Names: []string{"io"}},
 	"print_f64":  {Kind: parser.EffectsDecl, Names: []string{"io"}},
+	"read_line":  {Kind: parser.EffectsDecl, Names: []string{"io"}},
+	"read_int":   {Kind: parser.EffectsDecl, Names: []string{"io"}},
+	"read_f64":   {Kind: parser.EffectsDecl, Names: []string{"io"}},
 }
 
 func (c *checker) checkFile(file *parser.File) error {
