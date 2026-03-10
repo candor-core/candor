@@ -815,7 +815,7 @@ func (p *parser) parseMustArms() ([]MustArm, error) {
 	return arms, nil
 }
 
-// parseMustArmBody handles both `=> expr` and `=> return expr` arm bodies.
+// parseMustArmBody handles `=> expr`, `=> return expr`, and `=> break` arm bodies.
 func (p *parser) parseMustArmBody() (Expr, error) {
 	if p.check(lexer.TokReturn) {
 		retTok := p.advance()
@@ -824,6 +824,10 @@ func (p *parser) parseMustArmBody() (Expr, error) {
 			return nil, err
 		}
 		return &ReturnExpr{ReturnTok: retTok, Value: val}, nil
+	}
+	if p.check(lexer.TokBreak) {
+		breakTok := p.advance()
+		return &BreakExpr{BreakTok: breakTok}, nil
 	}
 	return p.parseExpr()
 }

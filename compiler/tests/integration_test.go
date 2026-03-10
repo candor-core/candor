@@ -844,3 +844,70 @@ fn main() -> unit {
 		t.Fatalf("got %q, want %q", got, "42\n")
 	}
 }
+
+// TestSumUntilEOF is the first "human/AI use test" program: read integers until
+// EOF using try_read_int + must{ break }, accumulate in a vec, print sum and count.
+func TestSumUntilEOF(t *testing.T) {
+	skipIfNoCC(t)
+	dir := t.TempDir()
+	src := `
+fn main() -> unit {
+    let mut nums: vec<i64> = vec_new()
+    loop {
+        let n = try_read_int()
+        let x = n must {
+            some(v) => v
+            none    => break
+        }
+        vec_push(nums, x)
+    }
+    let mut sum: i64 = 0
+    let mut count: i64 = 0
+    for n in nums {
+        sum = sum + n
+        count = count + 1
+    }
+    print_int(sum)
+    print_int(count)
+    return unit
+}
+`
+	bin := compile(t, dir, "sum_eof", src)
+	cmd := exec.Command(bin)
+	cmd.Stdin = strings.NewReader("3\n7\n10\n20\n")
+	out, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "40\n4\n" {
+		t.Fatalf("got %q, want %q", got, "40\n4\n")
+	}
+}
+
+// TestVecIndex verifies vec element access via v[i] syntax.
+func TestVecIndex(t *testing.T) {
+	skipIfNoCC(t)
+	dir := t.TempDir()
+	src := `
+fn main() -> unit {
+    let mut v: vec<i64> = vec_new()
+    vec_push(v, 100)
+    vec_push(v, 200)
+    vec_push(v, 300)
+    print_int(v[0])
+    print_int(v[1])
+    print_int(v[2])
+    return unit
+}
+`
+	bin := compile(t, dir, "vec_index", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "100\n200\n300\n" {
+		t.Fatalf("got %q, want %q", got, "100\n200\n300\n")
+	}
+}

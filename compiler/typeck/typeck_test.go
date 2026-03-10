@@ -892,3 +892,48 @@ fn main() -> unit {
     return unit
 }`)
 }
+
+// ── try_read_* / BreakExpr / vec indexing ─────────────────────────────────────
+
+func TestTryReadIntType(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let n: option<i64> = try_read_int()
+    return unit
+}`)
+}
+
+func TestTryReadLineType(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let s: option<str> = try_read_line()
+    return unit
+}`)
+}
+
+func TestBreakExprInMust(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    loop {
+        let n = try_read_int()
+        let x = n must {
+            some(v) => v
+            none    => break
+        }
+        print_int(x)
+    }
+    return unit
+}`)
+}
+
+func TestVecIndexing(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let mut v: vec<i64> = vec_new()
+    vec_push(v, 10)
+    vec_push(v, 20)
+    let x: i64 = v[0]
+    print_int(x)
+    return unit
+}`)
+}

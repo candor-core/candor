@@ -308,6 +308,15 @@ type ReturnExpr struct {
 func (e *ReturnExpr) Pos() lexer.Token { return e.ReturnTok }
 func (e *ReturnExpr) exprNode()        {}
 
+// BreakExpr wraps `break` when it appears inside a must{} arm body.
+// Its type is `never` — it exits the enclosing loop, not the arm.
+type BreakExpr struct {
+	BreakTok lexer.Token
+}
+
+func (e *BreakExpr) Pos() lexer.Token { return e.BreakTok }
+func (e *BreakExpr) exprNode()        {}
+
 // StructLitExpr: TypeName { field: value, ... }
 type StructLitExpr struct {
 	TypeName lexer.Token

@@ -823,6 +823,9 @@ func (e *emitter) emitExpr(expr parser.Expr, sb *strings.Builder) error {
 			return err
 		}
 
+	case *parser.BreakExpr:
+		sb.WriteString("break")
+
 	case *parser.CallExpr:
 		// Check for built-in print functions and vec builtins.
 		if ident, ok := ex.Fn.(*parser.IdentExpr); ok {
@@ -874,14 +877,28 @@ func (e *emitter) emitExpr(expr parser.Expr, sb *strings.Builder) error {
 		sb.WriteString(ex.Field.Lexeme)
 
 	case *parser.IndexExpr:
-		if err := e.emitExpr(ex.Collection, sb); err != nil {
-			return err
+		collType := e.res.ExprTypes[ex.Collection]
+		if gen, ok := collType.(*typeck.GenType); ok && (gen.Con == "vec" || gen.Con == "ring") {
+			// vec/ring are structs; elements are in the ._data array.
+			sb.WriteByte('(')
+			if err := e.emitExpr(ex.Collection, sb); err != nil {
+				return err
+			}
+			sb.WriteString(")._data[")
+			if err := e.emitExpr(ex.Index, sb); err != nil {
+				return err
+			}
+			sb.WriteByte(']')
+		} else {
+			if err := e.emitExpr(ex.Collection, sb); err != nil {
+				return err
+			}
+			sb.WriteByte('[')
+			if err := e.emitExpr(ex.Index, sb); err != nil {
+				return err
+			}
+			sb.WriteByte(']')
 		}
-		sb.WriteByte('[')
-		if err := e.emitExpr(ex.Index, sb); err != nil {
-			return err
-		}
-		sb.WriteByte(']')
 
 	case *parser.StructLitExpr:
 		sb.WriteByte('(')
@@ -969,6 +986,15 @@ func (e *emitter) emitBuiltinCall(name string, args []parser.Expr, sb *strings.B
 		case "read_f64":
 			sb.WriteString("(__extension__ ({ double _v; scanf(\"%lf\", &_v); _v; }))")
 			return true, nil
+		case "try_read_line":
+			sb.WriteString("_cnd_try_read_line()")
+			return true, nil
+		case "try_read_int":
+			sb.WriteString("_cnd_try_read_int()")
+			return true, nil
+		case "try_read_f64":
+			sb.WriteString("_cnd_try_read_f64()")
+			return true, nil
 		}
 	}
 
@@ -1026,6 +1052,37 @@ func (e *emitter) emitRuntimeHelpers() {
 	e.writeln("    char* _out = (char*)malloc(_n + 1);")
 	e.writeln("    memcpy(_out, _buf, _n + 1);")
 	e.writeln("    return _out;")
+	e.writeln("}")
+
+	// try_read_line: returns option<str> = const char** (NULL on EOF).
+	e.writeln("static const char** _cnd_try_read_line(void) {")
+	e.writeln("    static char _buf[4096];")
+	e.writeln("    if (!fgets(_buf, sizeof(_buf), stdin)) { return NULL; }")
+	e.writeln("    size_t _n = strlen(_buf);")
+	e.writeln("    while (_n > 0 && (_buf[_n-1] == '\\n' || _buf[_n-1] == '\\r')) { _buf[--_n] = '\\0'; }")
+	e.writeln("    char* _s = (char*)malloc(_n + 1);")
+	e.writeln("    memcpy(_s, _buf, _n + 1);")
+	e.writeln("    const char** _p = (const char**)malloc(sizeof(const char*));")
+	e.writeln("    *_p = _s;")
+	e.writeln("    return _p;")
+	e.writeln("}")
+
+	// try_read_int: returns option<i64> = int64_t* (NULL on EOF/parse failure).
+	e.writeln("static int64_t* _cnd_try_read_int(void) {")
+	e.writeln("    int64_t _v;")
+	e.writeln("    if (scanf(\"%lld\", &_v) != 1) { return NULL; }")
+	e.writeln("    int64_t* _p = (int64_t*)malloc(sizeof(int64_t));")
+	e.writeln("    *_p = _v;")
+	e.writeln("    return _p;")
+	e.writeln("}")
+
+	// try_read_f64: returns option<f64> = double* (NULL on EOF/parse failure).
+	e.writeln("static double* _cnd_try_read_f64(void) {")
+	e.writeln("    double _v;")
+	e.writeln("    if (scanf(\"%lf\", &_v) != 1) { return NULL; }")
+	e.writeln("    double* _p = (double*)malloc(sizeof(double));")
+	e.writeln("    *_p = _v;")
+	e.writeln("    return _p;")
 	e.writeln("}")
 }
 
