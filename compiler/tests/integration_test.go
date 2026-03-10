@@ -712,3 +712,63 @@ fn main() -> unit {
 		}
 	}
 }
+
+func TestMatchIntPattern(t *testing.T) {
+	skipIfNoCC(t)
+	dir := t.TempDir()
+	src := `
+fn classify(n: i64) -> i64 {
+    return match n {
+        0  => 100,
+        1  => 200,
+        -1 => 300,
+        _  => 999
+    }
+}
+fn main() -> unit {
+    print_int(classify(0))
+    print_int(classify(1))
+    print_int(classify(-1))
+    print_int(classify(42))
+    return unit
+}
+`
+	bin := compile(t, dir, "match_int", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "100\n200\n300\n999\n" {
+		t.Fatalf("got %q, want %q", got, "100\n200\n300\n999\n")
+	}
+}
+
+func TestMatchStringPattern(t *testing.T) {
+	skipIfNoCC(t)
+	dir := t.TempDir()
+	src := `
+fn greet(s: str) -> i64 {
+    return match s {
+        "hello" => 1
+        "bye"   => 2
+        _       => 0
+    }
+}
+fn main() -> unit {
+    print_int(greet("hello"))
+    print_int(greet("bye"))
+    print_int(greet("other"))
+    return unit
+}
+`
+	bin := compile(t, dir, "match_str", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "1\n2\n0\n" {
+		t.Fatalf("got %q, want %q", got, "1\n2\n0\n")
+	}
+}

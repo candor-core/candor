@@ -63,6 +63,7 @@ func (e *emitter) emitFile(file *parser.File) error {
 	e.writeln("#include <stdint.h>")
 	e.writeln("#include <stdio.h>")
 	e.writeln("#include <stdlib.h>")
+	e.writeln("#include <string.h>")
 	e.writeln("#include <assert.h>")
 	e.writeln("")
 
@@ -1179,6 +1180,25 @@ func (e *emitter) patternCondAndBinding(pattern parser.Expr, xType typeck.Type, 
 			return tmp, "", nil
 		}
 		return fmt.Sprintf("!%s", tmp), "", nil
+
+	case *parser.IntLitExpr:
+		return fmt.Sprintf("(%s) == %s", tmp, p.Tok.Lexeme), "", nil
+
+	case *parser.FloatLitExpr:
+		return fmt.Sprintf("(%s) == %s", tmp, p.Tok.Lexeme), "", nil
+
+	case *parser.StringLitExpr:
+		return fmt.Sprintf("strcmp(%s, %s) == 0", tmp, p.Tok.Lexeme), "", nil
+
+	case *parser.UnaryExpr:
+		if p.Op.Type == lexer.TokMinus {
+			if inner, ok := p.Operand.(*parser.IntLitExpr); ok {
+				return fmt.Sprintf("(%s) == -%s", tmp, inner.Tok.Lexeme), "", nil
+			}
+			if inner, ok := p.Operand.(*parser.FloatLitExpr); ok {
+				return fmt.Sprintf("(%s) == -%s", tmp, inner.Tok.Lexeme), "", nil
+			}
+		}
 
 	case *parser.CallExpr:
 		fn, ok := p.Fn.(*parser.IdentExpr)

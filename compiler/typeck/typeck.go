@@ -1129,9 +1129,14 @@ func (c *checker) checkPattern(pattern parser.Expr, matchedType Type, sc *scope)
 			return nil, c.errorf(fn.Tok, "unknown pattern constructor %q", fn.Tok.Lexeme)
 		}
 	default:
-		// Literal pattern: check as expression
-		if _, err := c.checkExpr(pattern, sc, matchedType); err != nil {
+		// Literal / expression pattern (int, float, string, negation).
+		litType, err := c.checkExpr(pattern, sc, matchedType)
+		if err != nil {
 			return nil, err
+		}
+		if _, ok := Coerce(litType, matchedType); !ok {
+			return nil, c.errorf(pattern.Pos(),
+				"pattern type %s is incompatible with matched type %s", litType, matchedType)
 		}
 	}
 	return armSc, nil

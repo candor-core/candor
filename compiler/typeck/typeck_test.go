@@ -797,3 +797,53 @@ fn main() -> unit {
     return unit
 }`)
 }
+
+// ── Integer / literal pattern matching ───────────────────────────────────────
+
+func TestMatchIntLiteral(t *testing.T) {
+	mustCompile(t, `
+fn describe(n: i64) -> i64 {
+    return match n {
+        0 => 10
+        1 => 20
+        _ => 30
+    }
+}
+fn main() -> unit { return unit }`)
+}
+
+func TestMatchIntMismatch(t *testing.T) {
+	mustFail(t, `
+fn main() -> unit {
+    let n: i64 = 5
+    let x = match n {
+        true => 1
+        _ => 0
+    }
+    return unit
+}`, "incompatible")
+}
+
+func TestMatchStringLiteral(t *testing.T) {
+	mustCompile(t, `
+fn greet(s: str) -> i64 {
+    return match s {
+        "hello" => 1
+        "bye"   => 2
+        _       => 0
+    }
+}
+fn main() -> unit { return unit }`)
+}
+
+func TestMatchNegativeInt(t *testing.T) {
+	mustCompile(t, `
+fn sign(n: i64) -> i64 {
+    return match n {
+        -1 => 0,
+        0  => 1,
+        _  => 2
+    }
+}
+fn main() -> unit { return unit }`)
+}

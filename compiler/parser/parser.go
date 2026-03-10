@@ -786,9 +786,16 @@ func (p *parser) parseFieldInits() ([]FieldInit, error) {
 func (p *parser) parseMustArms() ([]MustArm, error) {
 	var arms []MustArm
 	for !p.check(lexer.TokRBrace) && !p.check(lexer.TokEOF) {
-		pattern, err := p.parseExpr()
-		if err != nil {
-			return nil, err
+		var pattern Expr
+		if p.check(lexer.TokUScore) {
+			tok := p.advance()
+			pattern = &IdentExpr{Tok: tok}
+		} else {
+			var err error
+			pattern, err = p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
 		}
 		arrow, err := p.expect(lexer.TokFatArrow)
 		if err != nil {
@@ -799,6 +806,11 @@ func (p *parser) parseMustArms() ([]MustArm, error) {
 			return nil, err
 		}
 		arms = append(arms, MustArm{Pattern: pattern, Arrow: arrow, Body: body})
+		// Optional comma separator between arms (required when the next arm
+		// pattern starts with '-' to avoid ambiguity with binary subtraction).
+		if p.check(lexer.TokComma) {
+			p.advance()
+		}
 	}
 	return arms, nil
 }
