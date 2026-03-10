@@ -6,7 +6,7 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Status: Pre-Alpha](https://img.shields.io/badge/Status-Pre--Alpha-orange.svg)]()
-[![Spec: v0.1](https://img.shields.io/badge/Spec-v0.1_Working_Draft-lightgrey.svg)](SPEC.md)
+[![Compiler: v0.0.1](https://img.shields.io/badge/Compiler-v0.0.1-green.svg)]()
 
 ---
 
@@ -14,10 +14,10 @@
 
 Candor is a systems programming language built on one principle:
 
-> A Candor program is a complete, honest declaration of everything it does.  
+> A Candor program is a complete, honest declaration of everything it does.
 > Nothing is hidden. Nothing is assumed. Nothing is implicit.
 
-Every side effect is declared. Every error must be handled. Every ownership transfer is visible in source. Every contract between caller and callee is machine-readable. Every piece of intent lives in the code itself — not in a comment, a wiki, or a programmer's memory.
+Every side effect is declared. Every error must be handled. Every contract between caller and callee is machine-readable. Every piece of intent lives in the code itself — not in a comment, a wiki, or a programmer's memory.
 
 This makes Candor unusually well-suited to the way software is being built today — where AI agents read, write, and reason about code alongside humans. A language that is honest with humans is honest with agents for exactly the same reasons.
 
@@ -26,36 +26,28 @@ This makes Candor unusually well-suited to the way software is being built today
 ## A Taste of Candor
 
 ```candor
-## Copyright (c) 2026 Scott W. Corley
-## SPDX-License-Identifier: Apache-2.0
-
-#intent "Transfer funds between two accounts atomically.
-         Either both balances change or neither does."
-
-@[intent: "Debit src and credit dst by amount. Rollback fully on any failure."]
-fn transfer(src: refmut<Account>, dst: refmut<Account>, amount: u64)
-    -> result<unit, TransferError>
-    effects   [io.write]
-    requires  src.balance >= amount
-    requires  amount > 0
-    ensures   ok(unit)  => src.balance == old(src.balance) - amount
-                       and dst.balance == old(dst.balance) + amount
-    ensures   err(_)    => src.balance == old(src.balance)
-                       and dst.balance == old(dst.balance)
+fn divide(a: i64, b: i64) -> result<i64, str>
+    requires b != 0
 {
-    src.balance -= amount
-    dst.balance += amount
-    return ok(unit)
+    return ok(a / b)
+}
+
+fn main() -> unit effects(io) {
+    let result = divide(10, 2) must {
+        ok(val) => val
+        err(e)  => return unit
+    }
+    print_int(result)
+    return unit
 }
 ```
 
-What the compiler knows from this declaration alone — without reading the body:
+What the compiler knows from these declarations alone:
 
-- This function writes to IO (database). It cannot be called in a pure context.
-- The caller is responsible for ensuring `src.balance >= amount`. The compiler verifies this at call sites.
-- If the function returns `ok`, both balances changed exactly as declared.
-- If the function returns `err`, neither balance changed. Rollback is guaranteed by contract, not by convention.
-- `old(src.balance)` captures the value at entry. If the ensures clause is violated, it is a compile error.
+- `divide` has a `requires b != 0` contract — the compiler emits an assertion in debug builds.
+- `main` carries `effects(io)` — it cannot be called from a `pure` function.
+- The `must{}` block is required — silence on a `result<T,E>` is a compile error.
+- `ok(val)` and `err(e)` are exhaustive pattern arms; the compiler rejects incomplete `must` blocks.
 
 ---
 
@@ -64,120 +56,236 @@ What the compiler knows from this declaration alone — without reading the body
 Candor is built in composable layers. Core is simple enough for a first day. Each layer adds power and safety without adding complexity to what came before.
 
 ```
-Core          primitives, ownership, control flow, result<T,E>
-  └─ effects      declare what a function can touch
-      └─ contracts    requires / ensures / invariants
-          └─ tags         @[pure] @[secret] @[retryable] — verified claims
-              └─ natural      intent-first development, verified examples
-                  └─ collections  vec<T> map<K,V> set<T> ring<T,N>
-                      └─ allocators   explicit, declared allocation strategies
-                          └─ channels      ownership-safe intra-process messaging
-                              └─ network       typed endpoints, auto-parallelism
-                                  └─ realtime     WCET contracts, ISR constraints
-                                      └─ crypto       constant-time, zeroize-on-drop
-                                          └─ semantic_index  compile-time vector search
-                                              └─ c_interop    honest C boundary
-                                                  └─ llvm_backend  direct IR emission
+Core          primitives, control flow, result<T,E>, option<T>, structs     [IMPLEMENTED]
+  effects       declare what a function can touch                            [IMPLEMENTED]
+  contracts     requires / ensures / assert                                  [IMPLEMENTED]
+  collections   vec<T> ring<T> (push, len, index, for)                      [IMPLEMENTED]
+  ...
+  tags          @[pure] @[secret] @[retryable] — verified claims            [future]
+  natural       intent-first development, verified examples                  [future]
+  allocators    explicit, declared allocation strategies                     [future]
+  channels      ownership-safe intra-process messaging                       [future]
+  network       typed endpoints, auto-parallelism                            [future]
+  realtime      WCET contracts, ISR constraints                              [future]
+  crypto        constant-time, zeroize-on-drop                               [future]
+  semantic_index compile-time vector search                                  [future]
+  c_interop     honest C boundary                                            [future]
+  llvm_backend  direct IR emission                                           [future]
 ```
 
-Every layer is opt-in. A program using only Core is valid, safe, and compilable. Adding a layer is a one-line `#use` declaration.
+Every layer is opt-in. A program using only Core is valid, safe, and compilable.
 
 ---
 
 ## Key Ideas
 
-### Effects — Zero-Cost Behavioral Declarations
+### Effects — Behavioral Declarations on Functions
 
 ```candor
-fn hash(data: ref<u8>, len: u64) -> u64
-    effects []          ## provably pure: memoizable, reorderable, parallelizable
-{ ... }
+fn pure_hash(x: i64) -> i64 pure {
+    return x * 2654435761
+}
 
-fn save(record: ref<Record>) -> result<unit, DbError>
-    effects [io.write, mem.alloc]   ## compiler knows exactly what this touches
-{ ... }
+fn log_message(msg: str) -> unit effects(io) {
+    print(msg)
+    return unit
+}
 ```
 
-A function declared `effects []` is provably pure. The compiler can memoize it, reorder it, and eliminate dead calls. No annotation needed at the call site — the declaration is the contract.
+A function declared `pure` cannot call any function that carries `effects(...)`. The compiler enforces this through the entire call graph. A function with no annotation is unchecked — supporting gradual adoption.
 
-### Contracts — Bugs at Compile Time, Not Runtime
+### Errors — must{} Is Always Required
 
 ```candor
-fn binary_search(items: ref<vec<u64>>, target: u64) -> option<u64>
-    effects  []
-    requires forall i in 1..items.len: items[i] >= items[i-1]
-    ensures  some(idx) => items[idx] == target
-    ensures  none => forall i in 0..items.len: items[i] != target
+let v = divide(10, 2) must {
+    ok(val) => val
+    err(e)  => return unit
+}
 ```
 
-Contracts proven statically vanish from the binary — they cost nothing at runtime. Contracts that cannot be proven statically become debug assertions. Provably false contracts are hard compile errors.
+Discarding a `result<T,E>` or `option<T>` without `must{}` is a compile error. There are no exceptions. `break` is allowed in `must` arms when inside a loop.
 
-### Tags — Semantic Metadata That Cannot Lie
+### Contracts — Preconditions and Postconditions
 
 ```candor
-@[idempotent]
-@[retryable(max: 3, backoff: exponential)]
-@[secret]       ## compiler enforces: no logging, no serialization without declassify()
-@[pii]          ## taint-tracked through entire call graph
-@[realtime_safe] ## no allocation, no blocking, WCET verified
+fn safe_div(a: i64, b: i64) -> i64
+    requires b != 0
+    ensures result == a / b
+{
+    return a / b
+}
 ```
 
-Tags are verified claims grounded in effects and contracts. `@[pure]` requires `effects []`. `@[idempotent]` is verified against `ensures` clauses. `@[secret]` taint-tracks data through the entire call graph. They cannot drift from reality — the compiler enforces them.
+Contracts generate `assert()` calls in debug builds. `requires` guards the function entry. `ensures` references the return value as `result`.
 
-### Natural Layer — Intent-First Development
+### Pattern Matching — Exhaustive, Typed
 
 ```candor
-#intent "Provide a single entry point for all user data needed
-         at login time so callers do not need to know which
-         downstream services hold which pieces of user state."
+let label = match n {
+    0 => "zero"
+    1 => "one"
+    _ => "other"
+}
 
-@[intent: "Return profile, permissions, and preferences in one call."]
-fn get_user_context(user_id: UserId) -> result<UserContext, NetError>
-    effects [net.call, mem.alloc]
-{ ... }
+let v = match opt {
+    some(x) => x * 2
+    none    => 0
+}
 ```
 
-`#intent` declares *why a function needs to exist*. `candorc audit --intent` checks whether that goal is still necessary, still unmet by other functions, and still achievable given the current architecture. It is the mechanism by which Candor codebases stay lean as they grow.
+`match{}` works on integers, bools, strings, `option<T>`, and `result<T,E>`. Wildcard `_` matches anything. All arms must produce the same type.
 
-### Network Layer — Structural Parallelism
+---
 
-```candor
-## Three @[idempotent] calls with no data dependency:
-## Compiler emits concurrent requests automatically.
-## No async/await. No thread management. No explicit join.
+## Getting Started
 
-let user    = UserService.get_profile(user_id)    ## net.call
-let account = AccountService.get_balance(user_id) ## net.call
-let notifs  = NotifService.get_count(user_id)     ## net.call
-## Wall time: max(A, B, C) — not A + B + C
-```
+### Prerequisites
 
-### Realtime Layer — WCET as a Contract
+- Go 1.24 or later
+- GCC or a C compiler reachable as `gcc` or `cc` (override with the `CC` environment variable)
 
-```candor
-@[realtime_safe]
-@[priority(level: control)]
-@[deadline(us: 1000)]
-@[wcet(us: 400)]        ## verified transitively through entire call graph
-fn motor_control_loop(state: refmut<MotorState>) -> unit
-    effects [sys.call]
-```
-
-`@[wcet]` is a formal contract verified through the entire call graph. If any called function lacks a WCET declaration, it is a compile error in `--realtime=strict` mode. Priority inversion prevention is verified statically via lock acquisition graph analysis.
-
-### The Semantic Index — Meaning-Based Navigation
-
-Every `candorc build` produces a `.csi` file alongside the binary — a vector-embedded index of every declaration in the codebase, derived from the full Semantic IR (effects, contracts, tags, intent, goals). Zero bytes added to the binary.
+### Build the Compiler
 
 ```bash
-# Find functions by meaning, not just name:
-candorc search "authenticate user and establish session" --tag @[secret]
-candorc search --effects [io.write] --tag @[idempotent] --tag @[retryable]
-candorc search --similar-to payments::transfer_funds --top 5
-candorc search --goal "single entry point for session creation"
+git clone https://github.com/scottcorleyg1/candor
+cd candor/compiler
+go build -o candorc .
 ```
 
-Agents working in a Candor codebase query the `.csi` index as their primary navigation mechanism — replacing linear file reads with meaning-based lookup. The formal layer stack makes the index richer than any text embedding alone.
+### Write a Program
+
+```candor
+// hello.cnd
+fn main() -> unit {
+    print("hello, world")
+    return unit
+}
+```
+
+### Compile and Run
+
+```bash
+# Single file
+./candorc hello.cnd
+./hello          # on Unix
+hello.exe        # on Windows
+
+# Multi-file program
+./candorc main.cnd math.cnd
+
+# Inspect the emitted C
+cat hello.c
+```
+
+The compiler writes a `.c` file alongside the source for inspection, then invokes the system C compiler to produce a binary.
+
+---
+
+## Example Programs
+
+### Sum integers from stdin until EOF
+
+```candor
+fn main() -> unit {
+    let mut nums: vec<i64> = vec_new()
+    loop {
+        let x = try_read_int() must {
+            some(v) => v
+            none    => break
+        }
+        vec_push(nums, x)
+    }
+    let mut sum: i64 = 0
+    for n in nums {
+        sum = sum + n
+    }
+    print_int(sum)
+    return unit
+}
+```
+
+### FizzBuzz
+
+```candor
+fn fizzbuzz(n: i64) -> str {
+    let div3 = n % 3 == 0
+    let div5 = n % 5 == 0
+    return match div3 {
+        true => match div5 {
+            true  => "FizzBuzz"
+            false => "Fizz"
+        }
+        false => match div5 {
+            true  => "Buzz"
+            false => "?"
+        }
+    }
+}
+
+fn main() -> unit {
+    let mut i: i64 = 1
+    loop {
+        if i > 20 { break }
+        print(fizzbuzz(i))
+        i = i + 1
+    }
+    return unit
+}
+```
+
+### Multi-file with modules
+
+```candor
+// math.cnd
+module math
+
+fn square(x: i64) -> i64 { return x * x }
+fn cube(x: i64) -> i64 { return x * x * x }
+```
+
+```candor
+// main.cnd
+module app
+use math::square
+use math::cube
+
+fn main() -> unit {
+    print_int(square(4))   // 16
+    print_int(cube(3))     // 27
+    return unit
+}
+```
+
+```bash
+candorc main.cnd math.cnd
+```
+
+---
+
+## Status
+
+Candor `v0.0.1` is a working compiler. The pipeline `.cnd` source → lex → parse → typecheck → emit C → binary is complete. Real programs compile and run.
+
+| Component | Status |
+|---|---|
+| Lexer | Complete |
+| Parser | Complete |
+| Type checker | Complete |
+| Effects enforcement | Complete |
+| Contracts (requires/ensures) | Emit assert() |
+| Multi-file / module enforcement | Complete |
+| C emitter | Complete |
+| First-class functions | Complete |
+| Literal pattern matching | Complete |
+| vec\<T\> (push, len, index, for) | Complete |
+| stdin I/O (read_*, try_read_*) | Complete |
+| i128 / u128 | Not yet |
+| Lambdas / closures | Not yet |
+| User-defined enums | Not yet |
+| String operations (concat, len) | Not yet |
+| map\<K,V\> / set\<T\> | Not yet |
+| Allocator layer | Future |
+| LLVM backend | Future |
 
 ---
 
@@ -189,53 +297,26 @@ Candor is designed for the era where agents are collaborators, not just autocomp
 
 ---
 
-## Status
-
-Candor is in the **specification phase**. The language specification is complete through Layer 8 (`c_interop`). The compiler (`candorc`) is not yet written.
-
-| Component | Status |
-|-----------|--------|
-| Language Specification | ✅ Working Draft v0.1 |
-| Core grammar (EBNF) | 🔲 Planned |
-| `candorc` lexer | 🔲 Planned |
-| `candorc` parser | 🔲 Planned |
-| C transpiler (Phase 1) | 🔲 Planned |
-| Type checker | 🔲 Planned |
-| Effects verifier | 🔲 Planned |
-| LLVM backend (Phase 2) | 🔲 Future |
-
----
-
-## Getting Started
-
-The compiler does not exist yet. The best way to get started is to read the specification and contribute ideas, feedback, or design input.
-
-- **Full Specification:** [SPEC.md](SPEC.md)
-- **Layer-by-layer docs:** [`/spec`](spec/)
-- **Discussion:** GitHub Issues — use the `design` label for language design questions
-
----
-
 ## Contributing
 
-Candor is in its earliest stage. The most valuable contributions right now are:
+The most valuable contributions right now are:
 
+- **Compiler bugs** — open issues with a minimal `.cnd` reproducer
 - **Design feedback** — read the spec and open issues challenging assumptions
 - **Prior art** — know of an existing language that solved a similar problem? Open an issue
 - **Use cases** — describe a real program you'd want to write in Candor
-- **Formal methods expertise** — the contracts and effects layers will benefit from people who know this space
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines. All contributors must follow the [Code of Conduct](CODE_OF_CONDUCT.md).
+See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ---
 
 ## License
 
-Copyright © 2026 Scott W. Corley  
+Copyright © 2026 Scott W. Corley
 Licensed under the [Apache License, Version 2.0](LICENSE)
 
 The Candor name, language specification, and compiler source are the property of Scott W. Corley. Contributions are accepted under the Apache 2.0 license.
 
 ---
 
-*Candor — Working Draft v0.1*
+*Candor — compiler v0.0.1*
