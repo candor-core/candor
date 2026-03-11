@@ -29,6 +29,7 @@ const (
 	TokBreak
 	TokFor
 	TokStruct
+	TokEnum
 	TokExtern
 	TokPure
 	TokCap
@@ -113,6 +114,7 @@ var keywords = map[string]TokenType{
 	"break":     TokBreak,
 	"for":       TokFor,
 	"struct":    TokStruct,
+	"enum":      TokEnum,
 	"extern":    TokExtern,
 	"pure":      TokPure,
 	"cap":       TokCap,
@@ -170,6 +172,7 @@ var tokenNames = map[TokenType]string{
 	TokBreak:     "break",
 	TokFor:       "for",
 	TokStruct:    "struct",
+	TokEnum:      "enum",
 	TokExtern:    "extern",
 	TokPure:      "pure",
 	TokCap:       "cap",

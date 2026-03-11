@@ -1010,3 +1010,65 @@ fn main() -> unit {
     return unit
 }`)
 }
+
+// ── Enum tests ────────────────────────────────────────────────────────────────
+
+func TestEnumUnitVariants(t *testing.T) {
+	mustCompile(t, `
+enum Direction { North, South, East, West }
+fn main() -> unit {
+    let d: Direction = Direction::North
+    return unit
+}`)
+}
+
+func TestEnumDataVariant(t *testing.T) {
+	mustCompile(t, `
+enum Shape {
+    Circle(f64),
+    Rect(f64, f64),
+    Point,
+}
+fn area(s: Shape) -> f64 {
+    return match s {
+        Shape::Circle(r) => r * r * 3.14,
+        Shape::Rect(w, h) => w * h,
+        Shape::Point => 0.0,
+    }
+}
+fn main() -> unit {
+    let c = Shape::Circle(2.0)
+    let a = area(c)
+    return unit
+}`)
+}
+
+func TestEnumMatchReturnType(t *testing.T) {
+	mustCompile(t, `
+enum Msg { Quit, Text(str) }
+fn describe(m: Msg) -> str {
+    return match m {
+        Msg::Quit   => "quit",
+        Msg::Text(s) => s,
+    }
+}
+fn main() -> unit { return unit }`)
+}
+
+func TestEnumUnknownVariantError(t *testing.T) {
+	mustFail(t, `
+enum Color { Red, Green }
+fn main() -> unit {
+    let c = Color::Blue
+    return unit
+}`, "no variant")
+}
+
+func TestEnumWrongFieldCountError(t *testing.T) {
+	mustFail(t, `
+enum Shape { Circle(f64), Point }
+fn main() -> unit {
+    let s = Shape::Circle(1.0, 2.0)
+    return unit
+}`, "argument count")
+}

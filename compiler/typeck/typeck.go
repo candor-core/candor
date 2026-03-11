@@ -43,6 +43,8 @@ type Result struct {
 	FnSigs map[string]*FnType
 	// Structs maps struct names to their StructType.
 	Structs map[string]*StructType
+	// Enums maps enum names to their EnumType.
+	Enums map[string]*EnumType
 	// FnEffects maps function names to their effects annotation (may be nil).
 	FnEffects map[string]*parser.EffectsAnnotation
 }
@@ -55,6 +57,7 @@ func Check(file *parser.File) (*Result, error) {
 		exprTypes: make(map[parser.Expr]Type),
 		fnSigs:    make(map[string]*FnType),
 		structs:   make(map[string]*StructType),
+		enums:     make(map[string]*EnumType),
 		fnEffects: make(map[string]*parser.EffectsAnnotation),
 		// symModule intentionally nil — disables module enforcement
 	}
@@ -65,6 +68,7 @@ func Check(file *parser.File) (*Result, error) {
 		ExprTypes: c.exprTypes,
 		FnSigs:    c.fnSigs,
 		Structs:   c.structs,
+		Enums:     c.enums,
 		FnEffects: c.fnEffects,
 	}, nil
 }
@@ -78,6 +82,7 @@ func CheckProgram(files []*parser.File) (*Result, error) {
 		exprTypes: make(map[parser.Expr]Type),
 		fnSigs:    make(map[string]*FnType),
 		structs:   make(map[string]*StructType),
+		enums:     make(map[string]*EnumType),
 		fnEffects: make(map[string]*parser.EffectsAnnotation),
 		symModule: make(map[string]string), // non-nil enables enforcement
 	}
@@ -88,6 +93,7 @@ func CheckProgram(files []*parser.File) (*Result, error) {
 		ExprTypes: c.exprTypes,
 		FnSigs:    c.fnSigs,
 		Structs:   c.structs,
+		Enums:     c.enums,
 		FnEffects: c.fnEffects,
 	}, nil
 }
@@ -134,6 +140,13 @@ func (c *checker) checkProgram(files []*parser.File) error {
 					return err
 				}
 				c.structs[decl.Name.Lexeme] = st
+				c.symModule[decl.Name.Lexeme] = mod
+			case *parser.EnumDecl:
+				et, err := c.buildEnumType(decl)
+				if err != nil {
+					return err
+				}
+				c.enums[decl.Name.Lexeme] = et
 				c.symModule[decl.Name.Lexeme] = mod
 			}
 		}
@@ -222,6 +235,7 @@ type checker struct {
 	exprTypes  map[parser.Expr]Type
 	fnSigs     map[string]*FnType
 	structs    map[string]*StructType
+	enums      map[string]*EnumType
 	fnEffects  map[string]*parser.EffectsAnnotation // collected effects annotations
 	curEffects *parser.EffectsAnnotation             // effects of fn currently being checked
 	errs       []error                               // collected statement-level errors
@@ -355,6 +369,12 @@ func (c *checker) checkFile(file *parser.File) error {
 				return err
 			}
 			c.structs[d.Name.Lexeme] = st
+		case *parser.EnumDecl:
+			et, err := c.buildEnumType(d)
+			if err != nil {
+				return err
+			}
+			c.enums[d.Name.Lexeme] = et
 		}
 	}
 	// Pass 2: type-check function bodies. Non-code decls are skipped.
@@ -399,6 +419,27 @@ func (c *checker) buildStructType(d *parser.StructDecl) (*StructType, error) {
 	return st, nil
 }
 
+func (c *checker) buildEnumType(d *parser.EnumDecl) (*EnumType, error) {
+	et := &EnumType{
+		Name:   d.Name.Lexeme,
+		ByName: make(map[string]*EnumVariantDef),
+	}
+	for i, v := range d.Variants {
+		fields := make([]Type, len(v.Fields))
+		for j, f := range v.Fields {
+			t, err := c.resolveTypeExpr(f)
+			if err != nil {
+				return nil, err
+			}
+			fields[j] = t
+		}
+		vd := &EnumVariantDef{Name: v.Name.Lexeme, Fields: fields, Tag: i}
+		et.Variants = append(et.Variants, vd)
+		et.ByName[v.Name.Lexeme] = vd
+	}
+	return et, nil
+}
+
 func (c *checker) resolveTypeExpr(te parser.TypeExpr) (Type, error) {
 	switch t := te.(type) {
 	case *parser.NamedType:
@@ -411,6 +452,9 @@ func (c *checker) resolveTypeExpr(te parser.TypeExpr) (Type, error) {
 				return nil, err
 			}
 			return st, nil
+		}
+		if et, ok := c.enums[name]; ok {
+			return et, nil
 		}
 		return nil, c.errorf(t.Name, "unknown type %q", name)
 
@@ -757,6 +801,9 @@ func (c *checker) inferExpr(expr parser.Expr, sc *scope, hint Type) (Type, error
 
 	case *parser.StructLitExpr:
 		return c.inferStructLitExpr(e, sc)
+
+	case *parser.PathExpr:
+		return c.inferPathExpr(e, sc)
 
 	default:
 		return nil, fmt.Errorf("unhandled Expr %T", expr)
@@ -1106,7 +1153,49 @@ func (c *checker) checkPattern(pattern parser.Expr, matchedType Type, sc *scope)
 			c.record(p, matchedType)
 			armSc.define(name, matchedType)
 		}
+	case *parser.PathExpr:
+		// Unit enum variant pattern: Shape::Point
+		et, ok := c.enums[p.Head.Lexeme]
+		if !ok {
+			return nil, c.errorf(p.Head, "undefined enum %q in pattern", p.Head.Lexeme)
+		}
+		vd, ok := et.ByName[p.Tail.Lexeme]
+		if !ok {
+			return nil, c.errorf(p.Tail, "enum %s has no variant %q", et.Name, p.Tail.Lexeme)
+		}
+		if len(vd.Fields) != 0 {
+			return nil, c.errorf(p.Tail, "variant %s::%s has fields — use %s::%s(...) pattern",
+				et.Name, vd.Name, et.Name, vd.Name)
+		}
+		c.record(p, et)
+
 	case *parser.CallExpr:
+		// Check for enum variant pattern: Shape::Circle(r)
+		if path, ok2 := p.Fn.(*parser.PathExpr); ok2 {
+			et, ok := c.enums[path.Head.Lexeme]
+			if !ok {
+				return nil, c.errorf(path.Head, "undefined enum %q in pattern", path.Head.Lexeme)
+			}
+			vd, ok := et.ByName[path.Tail.Lexeme]
+			if !ok {
+				return nil, c.errorf(path.Tail, "enum %s has no variant %q", et.Name, path.Tail.Lexeme)
+			}
+			if len(p.Args) != len(vd.Fields) {
+				return nil, c.errorf(p.LParen,
+					"variant %s::%s has %d field(s), pattern binds %d",
+					et.Name, vd.Name, len(vd.Fields), len(p.Args))
+			}
+			c.record(path, et)
+			for i, arg := range p.Args {
+				fieldType := vd.Fields[i]
+				if v, ok3 := arg.(*parser.IdentExpr); ok3 && v.Tok.Lexeme != "_" {
+					armSc.define(v.Tok.Lexeme, fieldType)
+					c.record(v, fieldType)
+				}
+			}
+			return armSc, nil
+		}
+
 		fn, ok := p.Fn.(*parser.IdentExpr)
 		if !ok {
 			return nil, c.errorf(p.Fn.Pos(), "invalid pattern")
@@ -1348,6 +1437,29 @@ func (m multiError) Error() string {
 		msgs[i] = e.Error()
 	}
 	return strings.Join(msgs, "\n")
+}
+
+// inferPathExpr handles Enum::Variant — a unit enum variant or the fn-position
+// of a call expression that constructs a data-carrying variant.
+func (c *checker) inferPathExpr(e *parser.PathExpr, sc *scope) (Type, error) {
+	et, ok := c.enums[e.Head.Lexeme]
+	if !ok {
+		return nil, c.errorf(e.Head, "undefined enum %q", e.Head.Lexeme)
+	}
+	vd, ok := et.ByName[e.Tail.Lexeme]
+	if !ok {
+		return nil, c.errorf(e.Tail, "enum %s has no variant %q", et.Name, e.Tail.Lexeme)
+	}
+	// Unit variant used as a value — record and return the enum type.
+	if len(vd.Fields) == 0 {
+		c.record(e, et)
+		return et, nil
+	}
+	// Data variant in non-call position: return a synthetic FnType so that
+	// inferCallExpr can check the arguments when this PathExpr is the Fn.
+	ft := &FnType{Params: vd.Fields, Ret: et}
+	c.record(e, ft)
+	return ft, nil
 }
 
 func (c *checker) inferStructLitExpr(e *parser.StructLitExpr, sc *scope) (Type, error) {

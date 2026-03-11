@@ -95,6 +95,15 @@ func (e *emitter) emitFile(file *parser.File) error {
 		}
 	}
 
+	// Emit enum definitions (tagged unions).
+	for _, decl := range file.Decls {
+		if d, ok := decl.(*parser.EnumDecl); ok {
+			if err := e.emitEnumDecl(d); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Emit fn(...)->... function pointer typedefs after structs are defined,
 	// since fn types may reference struct types in their parameter/return types.
 	if err := e.emitFnTypeTypedefs(); err != nil {
@@ -370,6 +379,81 @@ func (e *emitter) emitStructDecl(d *parser.StructDecl) error {
 		e.writef("    %s %s;\n", cType, f.Name.Lexeme)
 	}
 	e.writef("} %s;\n", d.Name.Lexeme)
+	return nil
+}
+
+// ── enum ──────────────────────────────────────────────────────────────────────
+
+// emitEnumDecl emits a tagged-union struct for a user-defined enum.
+// For each enum Foo with variants A, B(T), C(T1,T2) it emits:
+//
+//	typedef struct { int _tag; union { ... } _data; } Foo;
+//	static const int Foo_tag_A = 0; ...
+//	static inline Foo Foo_A(void) { ... }
+//	static inline Foo Foo_B(T _0) { ... }
+func (e *emitter) emitEnumDecl(d *parser.EnumDecl) error {
+	et := e.res.Enums[d.Name.Lexeme]
+	name := d.Name.Lexeme
+
+	// Determine if any variant carries data.
+	hasData := false
+	for _, v := range et.Variants {
+		if len(v.Fields) > 0 {
+			hasData = true
+			break
+		}
+	}
+
+	e.writef("\ntypedef struct %s {\n    int _tag;\n", name)
+	if hasData {
+		e.writeln("    union {")
+		for _, v := range et.Variants {
+			if len(v.Fields) == 0 {
+				continue
+			}
+			e.writef("        struct {")
+			for i, ft := range v.Fields {
+				ct, err := e.cType(ft)
+				if err != nil {
+					return err
+				}
+				e.writef(" %s _%d;", ct, i)
+			}
+			e.writef(" } _%s;\n", v.Name)
+		}
+		e.writeln("    } _data;")
+	}
+	e.writef("} %s;\n", name)
+
+	// Tag constants.
+	for _, v := range et.Variants {
+		e.writef("static const int %s_tag_%s = %d;\n", name, v.Name, v.Tag)
+	}
+
+	// Constructor functions.
+	for _, v := range et.Variants {
+		if len(v.Fields) == 0 {
+			e.writef("static inline %s %s_%s(void) { %s _r; _r._tag = %d; return _r; }\n",
+				name, name, v.Name, name, v.Tag)
+		} else {
+			// Build param list.
+			params := make([]string, len(v.Fields))
+			for i, ft := range v.Fields {
+				ct, err := e.cType(ft)
+				if err != nil {
+					return err
+				}
+				params[i] = fmt.Sprintf("%s _%d", ct, i)
+			}
+			e.writef("static inline %s %s_%s(%s) {\n", name, name, v.Name, strings.Join(params, ", "))
+			e.writef("    %s _r; _r._tag = %d;\n", name, v.Tag)
+			for i := range v.Fields {
+				e.writef("    _r._data._%s._%d = _%d;\n", v.Name, i, i)
+			}
+			e.writeln("    return _r;")
+			e.writeln("}")
+		}
+	}
 	return nil
 }
 
@@ -845,6 +929,20 @@ func (e *emitter) emitExpr(expr parser.Expr, sb *strings.Builder) error {
 		sb.WriteString("break")
 
 	case *parser.CallExpr:
+		// Enum variant constructor: Shape::Circle(2.0) → Shape_Circle(_0)
+		if path, ok := ex.Fn.(*parser.PathExpr); ok {
+			fmt.Fprintf(sb, "%s_%s(", path.Head.Lexeme, path.Tail.Lexeme)
+			for i, arg := range ex.Args {
+				if i > 0 {
+					sb.WriteString(", ")
+				}
+				if err := e.emitExpr(arg, sb); err != nil {
+					return err
+				}
+			}
+			sb.WriteByte(')')
+			return nil
+		}
 		// Check for built-in print functions and vec builtins.
 		if ident, ok := ex.Fn.(*parser.IdentExpr); ok {
 			// vec_new() emits a zero-initialised struct literal.
@@ -934,6 +1032,13 @@ func (e *emitter) emitExpr(expr parser.Expr, sb *strings.Builder) error {
 			}
 		}
 		sb.WriteString(" }")
+
+	case *parser.PathExpr:
+		// Unit enum variant: Shape::Point → Shape_Point()
+		sb.WriteString(ex.Head.Lexeme)
+		sb.WriteByte('_')
+		sb.WriteString(ex.Tail.Lexeme)
+		sb.WriteString("()")
 
 	default:
 		return fmt.Errorf("unhandled Expr %T in emit", expr)
@@ -1382,7 +1487,33 @@ func (e *emitter) patternCondAndBinding(pattern parser.Expr, xType typeck.Type, 
 			}
 		}
 
+	case *parser.PathExpr:
+		// Unit enum variant pattern: Shape::Point
+		cond = fmt.Sprintf("%s._tag == %s_tag_%s", tmp, p.Head.Lexeme, p.Tail.Lexeme)
+		return cond, "", nil
+
 	case *parser.CallExpr:
+		// Enum variant pattern with bindings: Shape::Circle(r)
+		if path, ok2 := p.Fn.(*parser.PathExpr); ok2 {
+			cond = fmt.Sprintf("%s._tag == %s_tag_%s", tmp, path.Head.Lexeme, path.Tail.Lexeme)
+			var bindings []string
+			for i, arg := range p.Args {
+				if v, ok3 := arg.(*parser.IdentExpr); ok3 && v.Tok.Lexeme != "_" {
+					vType := e.res.ExprTypes[v]
+					if vType != nil {
+						ct, err := e.cType(vType)
+						if err != nil {
+							return "", "", err
+						}
+						bindings = append(bindings,
+							fmt.Sprintf("%s %s = %s._data._%s._%d;",
+								ct, v.Tok.Lexeme, tmp, path.Tail.Lexeme, i))
+					}
+				}
+			}
+			return cond, strings.Join(bindings, " "), nil
+		}
+
 		fn, ok := p.Fn.(*parser.IdentExpr)
 		if !ok {
 			return "", "", fmt.Errorf("invalid pattern")
@@ -1521,6 +1652,9 @@ func (e *emitter) cType(t typeck.Type) (string, error) {
 		return "", fmt.Errorf("unsupported generic type: %s", t)
 
 	case *typeck.StructType:
+		return tt.Name, nil
+
+	case *typeck.EnumType:
 		return tt.Name, nil
 
 	case *typeck.FnType:

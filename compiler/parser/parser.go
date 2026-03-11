@@ -119,7 +119,8 @@ func (p *parser) parseFile(name string) (*File, error) {
 			for !p.check(lexer.TokEOF) &&
 				!p.check(lexer.TokDirective) &&
 				!p.check(lexer.TokFn) &&
-				!p.check(lexer.TokStruct) {
+				!p.check(lexer.TokStruct) &&
+				!p.check(lexer.TokEnum) {
 				p.advance()
 			}
 			continue
@@ -141,6 +142,8 @@ func (p *parser) parseDecl() (Decl, error) {
 		return p.parseFnDecl()
 	case lexer.TokStruct:
 		return p.parseStructDecl()
+	case lexer.TokEnum:
+		return p.parseEnumDecl()
 	case lexer.TokModule:
 		return p.parseModuleDecl()
 	case lexer.TokUse:
@@ -366,6 +369,54 @@ func (p *parser) parseStructDecl() (*StructDecl, error) {
 		Name:      nameTok,
 		Fields:    fields,
 	}, nil
+}
+
+func (p *parser) parseEnumDecl() (*EnumDecl, error) {
+	enumTok := p.advance() // consume 'enum'
+	nameTok, err := p.expect(lexer.TokIdent)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.TokLBrace); err != nil {
+		return nil, err
+	}
+	var variants []EnumVariant
+	for !p.check(lexer.TokRBrace) && !p.check(lexer.TokEOF) {
+		varName, err := p.expect(lexer.TokIdent)
+		if err != nil {
+			return nil, err
+		}
+		var fields []TypeExpr
+		if p.check(lexer.TokLParen) {
+			p.advance() // consume '('
+			for !p.check(lexer.TokRParen) && !p.check(lexer.TokEOF) {
+				if len(fields) > 0 {
+					if _, err := p.expect(lexer.TokComma); err != nil {
+						return nil, err
+					}
+				}
+				if p.check(lexer.TokRParen) {
+					break
+				}
+				fieldType, err := p.parseType()
+				if err != nil {
+					return nil, err
+				}
+				fields = append(fields, fieldType)
+			}
+			if _, err := p.expect(lexer.TokRParen); err != nil {
+				return nil, err
+			}
+		}
+		variants = append(variants, EnumVariant{Name: varName, Fields: fields})
+		if p.check(lexer.TokComma) {
+			p.advance()
+		}
+	}
+	if _, err := p.expect(lexer.TokRBrace); err != nil {
+		return nil, err
+	}
+	return &EnumDecl{EnumTok: enumTok, Name: nameTok, Variants: variants}, nil
 }
 
 // ── Statements ───────────────────────────────────────────────────────────────
@@ -868,6 +919,15 @@ func (p *parser) parsePrimaryExpr() (Expr, error) {
 		return &BoolLitExpr{Tok: t}, nil
 	case lexer.TokIdent, lexer.TokUScore:
 		p.advance()
+		// Check for Enum::Variant path
+		if t.Type == lexer.TokIdent && p.check(lexer.TokColonColon) {
+			sep := p.advance() // consume '::'
+			tail, err := p.expect(lexer.TokIdent)
+			if err != nil {
+				return nil, err
+			}
+			return &PathExpr{Head: t, Sep: sep, Tail: tail}, nil
+		}
 		return &IdentExpr{Tok: t}, nil
 	// These keywords also appear as expression values.
 	case lexer.TokSome, lexer.TokNone, lexer.TokOk, lexer.TokErr, lexer.TokMove:

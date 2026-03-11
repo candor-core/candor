@@ -84,6 +84,23 @@ type Field struct {
 	Type TypeExpr
 }
 
+// EnumDecl: enum Name { Variant, Variant(Type), ... }
+// User-defined sum type. Variants may carry zero or more typed fields.
+type EnumDecl struct {
+	EnumTok  lexer.Token
+	Name     lexer.Token
+	Variants []EnumVariant
+}
+
+func (d *EnumDecl) Pos() lexer.Token { return d.EnumTok }
+func (d *EnumDecl) declNode()        {}
+
+// EnumVariant: Name  or  Name(Type, ...)
+type EnumVariant struct {
+	Name   lexer.Token
+	Fields []TypeExpr // empty for unit variants
+}
+
 // ── Statements ───────────────────────────────────────────────────────────────
 
 type Stmt interface {
@@ -316,6 +333,17 @@ type BreakExpr struct {
 
 func (e *BreakExpr) Pos() lexer.Token { return e.BreakTok }
 func (e *BreakExpr) exprNode()        {}
+
+// PathExpr: Head::Tail — used for enum variant construction and patterns.
+// e.g. Shape::Circle, Token::EOF
+type PathExpr struct {
+	Head lexer.Token // enum type name
+	Sep  lexer.Token // ::
+	Tail lexer.Token // variant name
+}
+
+func (e *PathExpr) Pos() lexer.Token { return e.Head }
+func (e *PathExpr) exprNode()        {}
 
 // StructLitExpr: TypeName { field: value, ... }
 type StructLitExpr struct {

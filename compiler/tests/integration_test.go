@@ -1034,3 +1034,123 @@ fn main() -> unit {
 		t.Fatalf("got %q, want %q", got, "yes\n")
 	}
 }
+
+// ── Enum integration tests ────────────────────────────────────────────────────
+
+func TestEnumUnitMatch(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+enum Dir { North, South, East, West }
+fn label(d: Dir) -> str {
+    return match d {
+        Dir::North => "N",
+        Dir::South => "S",
+        Dir::East  => "E",
+        Dir::West  => "W",
+    }
+}
+fn main() -> unit {
+    print(label(Dir::North))
+    print(label(Dir::West))
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "enum_unit", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "N\nW\n" {
+		t.Fatalf("got %q, want %q", got, "N\nW\n")
+	}
+}
+
+func TestEnumDataMatch(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+enum Shape {
+    Circle(f64),
+    Rect(f64, f64),
+    Point,
+}
+fn area(s: Shape) -> f64 {
+    return match s {
+        Shape::Circle(r) => r * r * 3.14,
+        Shape::Rect(w, h) => w * h,
+        Shape::Point => 0.0,
+    }
+}
+fn main() -> unit {
+    let c = Shape::Circle(1.0)
+    let r = Shape::Rect(3.0, 4.0)
+    let p = Shape::Point
+    print_f64(area(c))
+    print_f64(area(r))
+    print_f64(area(p))
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "enum_data", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	// 1.0*1.0*3.14=3.14, 3.0*4.0=12.0, 0.0
+	if got != "3.140000\n12.000000\n0.000000\n" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestEnumInLoop(t *testing.T) {
+	skipIfNoCC(t)
+	// Extract value from enum variant using must{}, accumulate in loop.
+	src := `
+enum Cmd { Stop, Value(i64) }
+fn make_cmd(i: i64) -> Cmd {
+    return match i {
+        0 => Cmd::Value(10),
+        1 => Cmd::Value(20),
+        2 => Cmd::Value(30),
+        _ => Cmd::Stop,
+    }
+}
+fn get_value(c: Cmd) -> i64 {
+    return match c {
+        Cmd::Value(v) => v,
+        Cmd::Stop     => -1,
+    }
+}
+fn is_stop(c: Cmd) -> bool {
+    return match c {
+        Cmd::Stop    => true,
+        Cmd::Value(_) => false,
+    }
+}
+fn main() -> unit {
+    let mut i: i64 = 0
+    let mut sum: i64 = 0
+    loop {
+        let cmd = make_cmd(i)
+        if is_stop(cmd) { break }
+        sum = sum + get_value(cmd)
+        i = i + 1
+    }
+    print_int(sum)
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "enum_loop", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "60\n" {
+		t.Fatalf("got %q, want %q", got, "60\n")
+	}
+}

@@ -142,6 +142,28 @@ func (s *StructType) Equals(other Type) bool {
 	return ok && o.Name == s.Name
 }
 
+// ── Enum type ─────────────────────────────────────────────────────────────────
+
+// EnumVariantDef describes one variant of a user-defined enum.
+type EnumVariantDef struct {
+	Name   string
+	Fields []Type // empty for unit variants
+	Tag    int    // position index, used as discriminant in C
+}
+
+// EnumType is a user-defined sum type declared with `enum`.
+type EnumType struct {
+	Name     string
+	Variants []*EnumVariantDef    // ordered — index == tag
+	ByName   map[string]*EnumVariantDef
+}
+
+func (e *EnumType) String() string { return e.Name }
+func (e *EnumType) Equals(other Type) bool {
+	o, ok := other.(*EnumType)
+	return ok && o.Name == e.Name
+}
+
 // ── Type predicates ───────────────────────────────────────────────────────────
 
 func IsIntType(t Type) bool {
