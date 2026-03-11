@@ -64,6 +64,7 @@ func Check(file *parser.File) (*Result, error) {
 		enums:        make(map[string]*EnumType),
 		fnEffects:    make(map[string]*parser.EffectsAnnotation),
 		fnDecls:      make(map[string]*parser.FnDecl),
+		externFns:    make(map[string]bool),
 		comptimeVals: make(map[parser.Expr]interface{}),
 		// symModule intentionally nil — disables module enforcement
 	}
@@ -93,6 +94,7 @@ func CheckProgram(files []*parser.File) (*Result, error) {
 		enums:        make(map[string]*EnumType),
 		fnEffects:    make(map[string]*parser.EffectsAnnotation),
 		fnDecls:      make(map[string]*parser.FnDecl),
+		externFns:    make(map[string]bool),
 		comptimeVals: make(map[parser.Expr]interface{}),
 		symModule:    make(map[string]string), // non-nil enables enforcement
 	}
@@ -161,6 +163,25 @@ func (c *checker) checkProgram(files []*parser.File) error {
 				}
 				c.enums[decl.Name.Lexeme] = et
 				c.symModule[decl.Name.Lexeme] = mod
+			case *parser.ExternFnDecl:
+				params := make([]Type, len(decl.Params))
+				for i, p := range decl.Params {
+					t, err := c.resolveTypeExpr(p.Type)
+					if err != nil {
+						return err
+					}
+					params[i] = t
+				}
+				ret, err := c.resolveTypeExpr(decl.RetType)
+				if err != nil {
+					return err
+				}
+				c.fnSigs[decl.Name.Lexeme] = &FnType{Params: params, Ret: ret}
+				c.symModule[decl.Name.Lexeme] = mod
+				if decl.Effects != nil {
+					c.fnEffects[decl.Name.Lexeme] = decl.Effects
+				}
+				c.externFns[decl.Name.Lexeme] = true
 			}
 		}
 	}
@@ -251,6 +272,7 @@ type checker struct {
 	enums        map[string]*EnumType
 	fnEffects    map[string]*parser.EffectsAnnotation // collected effects annotations
 	fnDecls      map[string]*parser.FnDecl             // function bodies for comptime eval
+	externFns    map[string]bool                       // extern fn names
 	comptimeVals map[parser.Expr]interface{}           // comptime-evaluated call results
 	curEffects   *parser.EffectsAnnotation             // effects of fn currently being checked
 	errs         []error                               // collected statement-level errors
@@ -398,6 +420,24 @@ func (c *checker) checkFile(file *parser.File) error {
 				return err
 			}
 			c.enums[d.Name.Lexeme] = et
+		case *parser.ExternFnDecl:
+			params := make([]Type, len(d.Params))
+			for i, p := range d.Params {
+				t, err := c.resolveTypeExpr(p.Type)
+				if err != nil {
+					return err
+				}
+				params[i] = t
+			}
+			ret, err := c.resolveTypeExpr(d.RetType)
+			if err != nil {
+				return err
+			}
+			c.fnSigs[d.Name.Lexeme] = &FnType{Params: params, Ret: ret}
+			if d.Effects != nil {
+				c.fnEffects[d.Name.Lexeme] = d.Effects
+			}
+			c.externFns[d.Name.Lexeme] = true
 		}
 	}
 	// Pass 2: type-check function bodies. Non-code decls are skipped.
@@ -581,6 +621,8 @@ func (c *checker) checkStmt(stmt parser.Stmt, sc *scope, retType Type) error {
 		return c.checkAssignStmt(s, sc)
 	case *parser.FieldAssignStmt:
 		return c.checkFieldAssignStmt(s, sc)
+	case *parser.IndexAssignStmt:
+		return c.checkIndexAssignStmt(s, sc)
 	case *parser.AssertStmt:
 		return c.checkAssertStmt(s, sc)
 	default:
@@ -647,6 +689,37 @@ func (c *checker) checkFieldAssignStmt(s *parser.FieldAssignStmt, sc *scope) err
 	}
 	c.exprTypes[s.Value] = coerced
 	c.record(s.Target, fieldType)
+	return nil
+}
+
+func (c *checker) checkIndexAssignStmt(s *parser.IndexAssignStmt, sc *scope) error {
+	collType, err := c.checkExpr(s.Target.Collection, sc, nil)
+	if err != nil {
+		return err
+	}
+	gen, ok := collType.(*GenType)
+	if !ok || gen.Con != "vec" || len(gen.Params) == 0 {
+		return c.errorf(s.Target.Pos(), "index assignment requires vec<T>, got %s", collType)
+	}
+	elemType := gen.Params[0]
+	// Check the index is an integer type.
+	idxType, err := c.checkExpr(s.Target.Index, sc, TI64)
+	if err != nil {
+		return err
+	}
+	if !IsIntType(idxType) {
+		return c.errorf(s.Target.Index.Pos(), "vec index must be an integer, got %s", idxType)
+	}
+	// Check the value.
+	valType, err := c.checkExpr(s.Value, sc, elemType)
+	if err != nil {
+		return err
+	}
+	coerced, ok2 := Coerce(valType, elemType)
+	if !ok2 {
+		return c.errorf(s.Value.Pos(), "cannot assign %s to vec element of type %s", valType, elemType)
+	}
+	c.exprTypes[s.Value] = coerced
 	return nil
 }
 
@@ -1682,15 +1755,28 @@ func (c *checker) checkForStmt(s *parser.ForStmt, sc *scope, retType Type) error
 	if err != nil {
 		return err
 	}
-	gen, ok := collType.(*GenType)
-	if !ok || (gen.Con != "vec" && gen.Con != "ring") || len(gen.Params) == 0 {
-		return c.errorf(s.ForTok, "for..in requires vec<T> or ring<T>, got %s", collType)
+	loopSc := newScope(sc)
+
+	if s.Var2 != nil {
+		// for k, v in map<K,V>
+		gen, ok := collType.(*GenType)
+		if !ok || gen.Con != "map" || len(gen.Params) != 2 {
+			return c.errorf(s.InTok, "for k, v in ... requires map<K,V>, got %s", collType)
+		}
+		loopSc.define(s.Var.Lexeme, gen.Params[0])
+		c.record(&parser.IdentExpr{Tok: s.Var}, gen.Params[0])
+		loopSc.define(s.Var2.Lexeme, gen.Params[1])
+		c.record(&parser.IdentExpr{Tok: *s.Var2}, gen.Params[1])
+	} else {
+		// existing vec/ring handling
+		gen, ok := collType.(*GenType)
+		if !ok || (gen.Con != "vec" && gen.Con != "ring") || len(gen.Params) == 0 {
+			return c.errorf(s.InTok, "for...in requires vec<T> or ring<T>, got %s", collType)
+		}
+		loopSc.define(s.Var.Lexeme, gen.Params[0])
+		c.record(&parser.IdentExpr{Tok: s.Var}, gen.Params[0])
 	}
-	elemType := gen.Params[0]
-	// Create a scope with the element variable bound, then check the body.
-	forSc := newScope(sc)
-	forSc.define(s.Var.Lexeme, elemType)
-	return c.checkBlock(s.Body, forSc, retType)
+	return c.checkBlock(s.Body, loopSc, retType)
 }
 
 func (c *checker) checkAssertStmt(s *parser.AssertStmt, sc *scope) error {

@@ -115,6 +115,15 @@ func (e *emitter) emitFile(file *parser.File) error {
 		return err
 	}
 
+	// Forward-declare extern functions.
+	for _, decl := range file.Decls {
+		if d, ok := decl.(*parser.ExternFnDecl); ok {
+			if err := e.emitExternFnDecl(d); err != nil {
+				return err
+			}
+		}
+	}
+
 	// Forward-declare all functions.
 	for _, decl := range file.Decls {
 		if d, ok := decl.(*parser.FnDecl); ok {
@@ -629,6 +638,28 @@ func (e *emitter) emitEnumDecl(d *parser.EnumDecl) error {
 
 // ── functions ─────────────────────────────────────────────────────────────────
 
+func (e *emitter) emitExternFnDecl(d *parser.ExternFnDecl) error {
+	sig := e.res.FnSigs[d.Name.Lexeme]
+	retC, err := e.cType(sig.Ret)
+	if err != nil {
+		return err
+	}
+	if len(d.Params) == 0 {
+		e.writef("extern %s %s(void);\n", retC, d.Name.Lexeme)
+		return nil
+	}
+	params := make([]string, len(d.Params))
+	for i, p := range d.Params {
+		ct, err := e.cType(sig.Params[i])
+		if err != nil {
+			return err
+		}
+		params[i] = ct + " " + p.Name.Lexeme
+	}
+	e.writef("extern %s %s(%s);\n", retC, d.Name.Lexeme, strings.Join(params, ", "))
+	return nil
+}
+
 func (e *emitter) emitFnForward(d *parser.FnDecl) error {
 	sig := e.res.FnSigs[d.Name.Lexeme]
 	proto, err := e.fnProto(d.Name.Lexeme, sig)
@@ -900,6 +931,38 @@ func (e *emitter) emitStmt(stmt parser.Stmt, depth int) error {
 		}
 		e.write(";\n")
 
+	case *parser.IndexAssignStmt:
+		collType := e.res.ExprTypes[s.Target.Collection]
+		e.write(ind)
+		if gen, ok := collType.(*typeck.GenType); ok && (gen.Con == "vec" || gen.Con == "ring") {
+			e.write("(")
+			if err := e.emitExpr(s.Target.Collection, &e.sb); err != nil {
+				return err
+			}
+			e.write(")._data[")
+			if err := e.emitExpr(s.Target.Index, &e.sb); err != nil {
+				return err
+			}
+			e.write("] = ")
+			if err := e.emitExpr(s.Value, &e.sb); err != nil {
+				return err
+			}
+			e.write(";\n")
+		} else {
+			if err := e.emitExpr(s.Target.Collection, &e.sb); err != nil {
+				return err
+			}
+			e.write("[")
+			if err := e.emitExpr(s.Target.Index, &e.sb); err != nil {
+				return err
+			}
+			e.write("] = ")
+			if err := e.emitExpr(s.Value, &e.sb); err != nil {
+				return err
+			}
+			e.write(";\n")
+		}
+
 	case *parser.AssertStmt:
 		e.write(ind + "assert(")
 		if err := e.emitExpr(s.Expr, &e.sb); err != nil {
@@ -920,6 +983,48 @@ func (e *emitter) emitForStmt(s *parser.ForStmt, depth int) error {
 	ind := indent(depth)
 	collType := e.res.ExprTypes[s.Collection]
 	gen := collType.(*typeck.GenType) // validated by typeck
+
+	if s.Var2 != nil {
+		// for k, v in map<K,V>
+		kC, err := e.cType(gen.Params[0])
+		if err != nil {
+			return err
+		}
+		vC, err := e.cType(gen.Params[1])
+		if err != nil {
+			return err
+		}
+		mapTypeName := e.mapTypeName(kC, vC)
+		entryName := e.mapEntryName(kC, vC)
+		var collB strings.Builder
+		if err := e.emitExpr(s.Collection, &collB); err != nil {
+			return err
+		}
+		mTmp := e.freshTmp()
+		biTmp := e.freshTmp()
+		enTmp := e.freshTmp()
+		e.writef("%s{\n", ind)
+		e.writef("%s    %s %s = %s;\n", ind, mapTypeName, mTmp, collB.String())
+		e.writef("%s    if (%s._buckets) {\n", ind, mTmp)
+		e.writef("%s        for (uint64_t %s = 0; %s < %s._cap; %s++) {\n",
+			ind, biTmp, biTmp, mTmp, biTmp)
+		e.writef("%s            %s* %s = %s._buckets[%s];\n",
+			ind, entryName, enTmp, mTmp, biTmp)
+		e.writef("%s            while (%s) {\n", ind, enTmp)
+		e.writef("%s                %s %s = %s->_key;\n", ind, kC, s.Var.Lexeme, enTmp)
+		e.writef("%s                %s %s = %s->_val;\n", ind, vC, s.Var2.Lexeme, enTmp)
+		if err := e.emitBlock(s.Body, depth+4); err != nil {
+			return err
+		}
+		e.writef("%s                %s = %s->_next;\n", ind, enTmp, enTmp)
+		e.writef("%s            }\n", ind)
+		e.writef("%s        }\n", ind)
+		e.writef("%s    }\n", ind)
+		e.writef("%s}\n", ind)
+		return nil
+	}
+
+	// vec/ring iteration
 	elemC, err := e.cType(gen.Params[0])
 	if err != nil {
 		return err

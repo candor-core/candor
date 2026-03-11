@@ -96,6 +96,19 @@ func (d *EnumDecl) Pos() lexer.Token { return d.EnumTok }
 func (d *EnumDecl) declNode()        {}
 
 // EnumVariant: Name  or  Name(Type, ...)
+
+// ExternFnDecl: extern fn name(params) -> ret [effects]
+// No body — the function is defined in C.
+type ExternFnDecl struct {
+	ExternTok lexer.Token
+	Name      lexer.Token
+	Params    []Param
+	RetType   TypeExpr
+	Effects   *EffectsAnnotation // optional
+}
+
+func (d *ExternFnDecl) Pos() lexer.Token { return d.ExternTok }
+func (d *ExternFnDecl) declNode()        {}
 type EnumVariant struct {
 	Name   lexer.Token
 	Fields []TypeExpr // empty for unit variants
@@ -175,10 +188,12 @@ func (s *BreakStmt) Pos() lexer.Token { return s.BreakTok }
 func (s *BreakStmt) stmtNode()        {}
 
 // ForStmt: for name in collection { body }
-// Collection must be vec<T> or ring<T>; name is bound to element type T.
+//          for key, val in map    { body }  (map iteration)
+// Collection must be vec<T>, ring<T>, or map<K,V>; names are bound to element types.
 type ForStmt struct {
 	ForTok     lexer.Token
 	Var        lexer.Token
+	Var2       *lexer.Token // non-nil for map: for k, v in m
 	InTok      lexer.Token
 	Collection Expr
 	Body       *BlockStmt
@@ -206,6 +221,16 @@ type FieldAssignStmt struct {
 
 func (s *FieldAssignStmt) Pos() lexer.Token { return s.Target.Pos() }
 func (s *FieldAssignStmt) stmtNode()        {}
+
+// IndexAssignStmt: collection[index] = value
+type IndexAssignStmt struct {
+	Target *IndexExpr
+	Eq     lexer.Token
+	Value  Expr
+}
+
+func (s *IndexAssignStmt) Pos() lexer.Token { return s.Target.Pos() }
+func (s *IndexAssignStmt) stmtNode()        {}
 
 // ── Expressions ──────────────────────────────────────────────────────────────
 

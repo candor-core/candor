@@ -54,6 +54,10 @@ func walkStmtComptime(c *checker, s parser.Stmt) {
 		walkExprComptime(c, st.Value)
 	case *parser.AssignStmt:
 		walkExprComptime(c, st.Value)
+	case *parser.FieldAssignStmt:
+		walkExprComptime(c, st.Value)
+	case *parser.IndexAssignStmt:
+		// index assignment — not evaluated at comptime
 	case *parser.IfStmt:
 		walkExprComptime(c, st.Cond)
 		walkStmtsComptime(c, st.Then.Stmts)

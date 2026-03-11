@@ -1658,3 +1658,57 @@ fn main() -> unit {
 		t.Fatalf("got %q, want %q", got, "one\n")
 	}
 }
+
+// ── Feature: vec index assignment ───────────────────────────────────────────
+
+func TestVecIndexAssignIntegration(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+	let mut v: vec<i64> = vec_new()
+	vec_push(v, 10)
+	vec_push(v, 20)
+	v[0] = 99
+	print_int(v[0])
+	print_int(v[1])
+	return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "vec_index_assign", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "99\n20\n" {
+		t.Fatalf("got %q, want %q", got, "99\n20\n")
+	}
+}
+
+// ── Feature: for k, v in map ─────────────────────────────────────────────────
+
+func TestForKVInMapIntegration(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+	let mut m: map<str, i64> = map_new()
+	map_insert(m, "hello", 42)
+	for k, v in m {
+		print(k)
+		print_int(v)
+	}
+	return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "for_kv_map", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "hello\n42\n" {
+		t.Fatalf("got %q, want %q", got, "hello\n42\n")
+	}
+}

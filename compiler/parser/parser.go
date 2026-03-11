@@ -148,10 +148,68 @@ func (p *parser) parseDecl() (Decl, error) {
 		return p.parseModuleDecl()
 	case lexer.TokUse:
 		return p.parseUseDecl()
+	case lexer.TokExtern:
+		return p.parseExternFnDecl()
 	default:
 		t := p.peek()
 		return nil, p.errorf(t, "expected declaration (fn, struct, module, or use), got %v %q", t.Type, t.Lexeme)
 	}
+}
+
+func (p *parser) parseExternFnDecl() (*ExternFnDecl, error) {
+	externTok := p.advance() // consume 'extern'
+	if _, err := p.expect(lexer.TokFn); err != nil {
+		return nil, err
+	}
+	name, err := p.expect(lexer.TokIdent)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.TokLParen); err != nil {
+		return nil, err
+	}
+	var params []Param
+	for !p.check(lexer.TokRParen) && !p.check(lexer.TokEOF) {
+		if len(params) > 0 {
+			if _, err := p.expect(lexer.TokComma); err != nil {
+				return nil, err
+			}
+		}
+		if p.check(lexer.TokRParen) {
+			break
+		}
+		pName, err := p.expect(lexer.TokIdent)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.TokColon); err != nil {
+			return nil, err
+		}
+		pType, err := p.parseType()
+		if err != nil {
+			return nil, err
+		}
+		params = append(params, Param{Name: pName, Type: pType})
+	}
+	if _, err := p.expect(lexer.TokRParen); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.TokArrow); err != nil {
+		return nil, err
+	}
+	retType, err := p.parseType()
+	if err != nil {
+		return nil, err
+	}
+	// Optional effects annotation.
+	var effects *EffectsAnnotation
+	if p.check(lexer.TokPure) || p.check(lexer.TokEffects) {
+		effects, err = p.parseEffects()
+		if err != nil {
+			return nil, err
+		}
+	}
+	return &ExternFnDecl{ExternTok: externTok, Name: name, Params: params, RetType: retType, Effects: effects}, nil
 }
 
 func (p *parser) parseModuleDecl() (*ModuleDecl, error) {
@@ -540,6 +598,8 @@ func (p *parser) parseExprOrAssignStmt() (Stmt, error) {
 		return &AssignStmt{Name: t.Tok, Eq: eq, Value: value}, nil
 	case *FieldExpr:
 		return &FieldAssignStmt{Target: t, Eq: eq, Value: value}, nil
+	case *IndexExpr:
+		return &IndexAssignStmt{Target: t, Eq: eq, Value: value}, nil
 	default:
 		return nil, p.errorf(eq, "invalid assignment target")
 	}
@@ -601,6 +661,15 @@ func (p *parser) parseForStmt() (*ForStmt, error) {
 	if err != nil {
 		return nil, err
 	}
+	var var2 *lexer.Token
+	if p.check(lexer.TokComma) {
+		p.advance() // consume ','
+		v2, err := p.expect(lexer.TokIdent)
+		if err != nil {
+			return nil, err
+		}
+		var2 = &v2
+	}
 	inTok, err := p.expect(lexer.TokIn)
 	if err != nil {
 		return nil, err
@@ -613,7 +682,7 @@ func (p *parser) parseForStmt() (*ForStmt, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &ForStmt{ForTok: forTok, Var: varTok, InTok: inTok, Collection: coll, Body: body}, nil
+	return &ForStmt{ForTok: forTok, Var: varTok, Var2: var2, InTok: inTok, Collection: coll, Body: body}, nil
 }
 
 func (p *parser) parseExprStmt() (Stmt, error) {

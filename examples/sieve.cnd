@@ -1,0 +1,43 @@
+## Sieve of Eratosthenes - Candor performance benchmark
+## Counts primes up to N using vec<bool> and index assignment.
+
+fn sieve(n: i64) -> i64 {
+    let mut flags: vec<bool> = vec_new()
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        vec_push(flags, true)
+        i = i + 1
+    }
+    flags[0] = false
+    flags[1] = false
+
+    let mut j: i64 = 2
+    loop {
+        if j * j >= n { break }
+        if flags[j] {
+            let mut k: i64 = j * j
+            loop {
+                if k >= n { break }
+                flags[k] = false
+                k = k + j
+            }
+        }
+        j = j + 1
+    }
+
+    let mut count: i64 = 0
+    let mut m: i64 = 0
+    loop {
+        if m >= n { break }
+        if flags[m] { count = count + 1 }
+        m = m + 1
+    }
+    return count
+}
+
+fn main() -> unit {
+    let count = sieve(10000000)
+    print_int(count)
+    return unit
+}

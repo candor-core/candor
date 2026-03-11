@@ -690,7 +690,7 @@ fn sum(v: vec<u32>) -> u32 {
 }
 
 func TestForLoopNotVec(t *testing.T) {
-	mustFail(t, `fn f(x: u32) -> unit { for i in x { } return unit }`, "for..in requires vec")
+	mustFail(t, `fn f(x: u32) -> unit { for i in x { } return unit }`, "for...in requires vec")
 }
 
 func TestVecNew(t *testing.T) {
@@ -1404,4 +1404,98 @@ func TestMapInsertWrongKeyType(t *testing.T) {
 		map_insert(m, 42, 1)
 		return unit
 	}`, "key type")
+}
+
+// ── Feature: vec index assignment ─────────────────────────────────────────────
+
+func TestVecIndexAssign(t *testing.T) {
+	mustCompile(t, `fn f() -> unit {
+		let mut v: vec<i64> = vec_new()
+		vec_push(v, 10)
+		v[0] = 99
+		return unit
+	}`)
+}
+
+func TestVecIndexAssignTypeMismatch(t *testing.T) {
+	mustFail(t, `fn f() -> unit {
+		let mut v: vec<i64> = vec_new()
+		vec_push(v, 10)
+		v[0] = true
+		return unit
+	}`, "cannot assign")
+}
+
+func TestVecIndexAssignNonVec(t *testing.T) {
+	mustFail(t, `fn f() -> unit {
+		let mut x: i64 = 5
+		x[0] = 1
+		return unit
+	}`, "index assignment requires vec<T>")
+}
+
+// ── Feature: extern fn ────────────────────────────────────────────────────────
+
+func TestExternFnDecl(t *testing.T) {
+	r := mustCompile(t, `
+extern fn c_add(a: i64, b: i64) -> i64
+
+fn main() -> unit {
+	let _x: i64 = c_add(1, 2)
+	return unit
+}
+`)
+	sig, ok := r.FnSigs["c_add"]
+	if !ok {
+		t.Fatal("extern fn c_add not registered")
+	}
+	if len(sig.Params) != 2 || !sig.Params[0].Equals(TI64) {
+		t.Errorf("unexpected sig: %v", sig)
+	}
+}
+
+func TestExternFnNoBody(t *testing.T) {
+	// extern fn should not require a body
+	mustCompile(t, `
+extern fn printf(fmt: str) -> unit
+
+fn main() -> unit {
+	return unit
+}
+`)
+}
+
+// ── Feature: for k, v in map ──────────────────────────────────────────────────
+
+func TestForKVInMap(t *testing.T) {
+	mustCompile(t, `fn f() -> unit {
+		let mut m: map<str, i64> = map_new()
+		map_insert(m, "x", 1)
+		for k, v in m {
+			print(k)
+			print_int(v)
+		}
+		return unit
+	}`)
+}
+
+func TestForKVInMapWrongType(t *testing.T) {
+	mustFail(t, `fn f() -> unit {
+		let mut v: vec<i64> = vec_new()
+		for k, val in v {
+			print_int(k)
+		}
+		return unit
+	}`, "requires map<K,V>")
+}
+
+func TestForKVInMapKeyValTypes(t *testing.T) {
+	// k should be str, v should be i64 — check that wrong usage fails
+	mustFail(t, `fn f() -> unit {
+		let mut m: map<str, i64> = map_new()
+		for k, v in m {
+			let _x: i64 = k
+		}
+		return unit
+	}`, "cannot use")
 }
