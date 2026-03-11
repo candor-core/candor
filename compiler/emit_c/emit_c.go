@@ -1426,6 +1426,25 @@ func (e *emitter) emitConstructorCall(ex *parser.CallExpr, fn *parser.IdentExpr,
 		}
 		sb.WriteByte('}')
 		return true, nil
+
+	case lexer.TokMove:
+		// move(x) — semantic ownership transfer; in C just evaluates to x
+		if len(ex.Args) != 1 {
+			return false, nil
+		}
+		if err := e.emitExpr(ex.Args[0], sb); err != nil {
+			return true, err
+		}
+		return true, nil
+	}
+	// refmut(x) — mutable reference constructor; in C emits &x
+	if fn.Tok.Lexeme == "refmut" && len(ex.Args) == 1 {
+		sb.WriteString("(&(")
+		if err := e.emitExpr(ex.Args[0], sb); err != nil {
+			return true, err
+		}
+		sb.WriteString("))")
+		return true, nil
 	}
 	return false, nil
 }

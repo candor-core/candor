@@ -1140,3 +1140,62 @@ fn main() -> unit {
     return unit
 }`, "argument count")
 }
+
+// ── Ownership Tier 1 ──────────────────────────────────────────────────────────
+
+func TestRefParam(t *testing.T) {
+	mustCompile(t, `
+struct Point { x: i64, y: i64 }
+fn magnitude_sq(p: ref<Point>) -> i64 {
+    return p.x * p.x + p.y * p.y
+}
+fn main() -> unit {
+    let p = Point { x: 3, y: 4 }
+    let _m = magnitude_sq(&p)
+    return unit
+}`)
+}
+
+func TestRefmutParam(t *testing.T) {
+	mustCompile(t, `
+struct Point { x: i64, y: i64 }
+fn scale(p: refmut<Point>, factor: i64) -> unit {
+    p.x = p.x * factor
+    p.y = p.y * factor
+    return unit
+}
+fn main() -> unit {
+    let mut p = Point { x: 3, y: 4 }
+    scale(refmut(p), 2)
+    return unit
+}`)
+}
+
+func TestMoveCall(t *testing.T) {
+	mustCompile(t, `
+fn consume(x: i64) -> i64 { return x + 1 }
+fn main() -> unit {
+    let n: i64 = 42
+    let _r = consume(move(n))
+    return unit
+}`)
+}
+
+func TestDerefRef(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let x: i64 = 10
+    let r = &x
+    let _v: i64 = *r
+    return unit
+}`)
+}
+
+func TestDerefNonRef(t *testing.T) {
+	mustFail(t, `
+fn main() -> unit {
+    let x: i64 = 10
+    let _v = *x
+    return unit
+}`, "ref<T>")
+}

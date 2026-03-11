@@ -771,6 +771,8 @@ func (c *checker) inferExpr(expr parser.Expr, sc *scope, hint Type) (Type, error
 			switch ident.Tok.Type {
 			case lexer.TokOk, lexer.TokErr, lexer.TokSome, lexer.TokNone:
 				return c.inferConstructorCall(e, ident, sc, hint)
+			case lexer.TokMove:
+				return c.inferMoveCall(e, sc)
 			}
 			switch ident.Tok.Lexeme {
 			case "vec_new":
@@ -779,6 +781,8 @@ func (c *checker) inferExpr(expr parser.Expr, sc *scope, hint Type) (Type, error
 				return c.inferVecPush(e, ident, sc)
 			case "vec_len":
 				return c.inferVecLen(e, ident, sc)
+			case "refmut":
+				return c.inferRefmutCall(e, sc)
 			}
 		}
 		return c.inferCallExpr(e, sc)
@@ -947,6 +951,17 @@ func (c *checker) inferUnaryExpr(e *parser.UnaryExpr, sc *scope, hint Type) (Typ
 			return nil, err
 		}
 		return &GenType{Con: "ref", Params: []Type{t}}, nil
+
+	case lexer.TokStar:
+		t, err := c.checkExpr(e.Operand, sc, nil)
+		if err != nil {
+			return nil, err
+		}
+		gen, ok := t.(*GenType)
+		if !ok || (gen.Con != "ref" && gen.Con != "refmut") || len(gen.Params) == 0 {
+			return nil, c.errorf(e.Op, "unary * requires ref<T> or refmut<T>, got %s", t)
+		}
+		return gen.Params[0], nil
 
 	default:
 		return nil, c.errorf(e.Op, "unknown unary operator %q", e.Op.Lexeme)
@@ -1403,6 +1418,39 @@ func (c *checker) inferConstructorCall(e *parser.CallExpr, fn *parser.IdentExpr,
 		return t, nil
 	}
 	return nil, fmt.Errorf("unreachable constructor")
+}
+
+// inferMoveCall handles move(x) — semantically transfers ownership; type is T.
+func (c *checker) inferMoveCall(e *parser.CallExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 1 {
+		return nil, c.errorf(e.LParen, "move() takes 1 argument")
+	}
+	t, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	if fn, ok := e.Fn.(*parser.IdentExpr); ok {
+		c.record(fn, &GenType{Con: "move", Params: []Type{t}})
+	}
+	c.record(e, t)
+	return t, nil
+}
+
+// inferRefmutCall handles refmut(x) — creates a mutable reference; type is refmut<T>.
+func (c *checker) inferRefmutCall(e *parser.CallExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 1 {
+		return nil, c.errorf(e.LParen, "refmut() takes 1 argument")
+	}
+	t, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	refmutType := &GenType{Con: "refmut", Params: []Type{t}}
+	if fn, ok := e.Fn.(*parser.IdentExpr); ok {
+		c.record(fn, refmutType)
+	}
+	c.record(e, refmutType)
+	return refmutType, nil
 }
 
 func (c *checker) checkForStmt(s *parser.ForStmt, sc *scope, retType Type) error {

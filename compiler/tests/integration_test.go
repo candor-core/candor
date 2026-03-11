@@ -1249,3 +1249,104 @@ fn main() -> unit {
 		t.Fatalf("got %q, want %q", got, "missing\n")
 	}
 }
+
+// ── Ownership Tier 1 integration tests ───────────────────────────────────────
+
+func TestRefParamIntegration(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+struct Point { x: i64, y: i64 }
+fn magnitude_sq(p: ref<Point>) -> i64 {
+    return p.x * p.x + p.y * p.y
+}
+fn main() -> unit {
+    let p = Point { x: 3, y: 4 }
+    print_int(magnitude_sq(&p))
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "ref_param", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "25\n" {
+		t.Fatalf("got %q, want %q", got, "25\n")
+	}
+}
+
+func TestRefmutParamIntegration(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+struct Point { x: i64, y: i64 }
+fn scale(p: refmut<Point>, factor: i64) -> unit {
+    p.x = p.x * factor
+    p.y = p.y * factor
+    return unit
+}
+fn main() -> unit {
+    let mut p = Point { x: 3, y: 4 }
+    scale(refmut(p), 2)
+    print_int(p.x)
+    print_int(p.y)
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "refmut_param", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "6\n8\n" {
+		t.Fatalf("got %q, want %q", got, "6\n8\n")
+	}
+}
+
+func TestDerefIntegration(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+    let x: i64 = 42
+    let r = &x
+    let v: i64 = *r
+    print_int(v)
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "deref", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "42\n" {
+		t.Fatalf("got %q, want %q", got, "42\n")
+	}
+}
+
+func TestMoveIntegration(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn twice(x: i64) -> i64 { return x * 2 }
+fn main() -> unit {
+    let n: i64 = 21
+    print_int(twice(move(n)))
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "move_call", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "42\n" {
+		t.Fatalf("got %q, want %q", got, "42\n")
+	}
+}

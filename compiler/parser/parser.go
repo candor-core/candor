@@ -953,6 +953,14 @@ func (p *parser) parsePrimaryExpr() (Expr, error) {
 			return nil, err
 		}
 		return &UnaryExpr{Op: amp, Operand: operand}, nil
+	case lexer.TokStar:
+		// Deref: *expr
+		star := p.advance()
+		operand, err := p.parseUnaryExpr()
+		if err != nil {
+			return nil, err
+		}
+		return &UnaryExpr{Op: star, Operand: operand}, nil
 	default:
 		return nil, p.errorf(t, "expected expression, got %v %q", t.Type, t.Lexeme)
 	}
