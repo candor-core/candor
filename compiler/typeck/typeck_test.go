@@ -1337,3 +1337,71 @@ fn main() -> unit {
 		t.Fatalf("expected comptime value 12, got %v", res.ComptimeValues)
 	}
 }
+
+// ── map<K,V> tests ────────────────────────────────────────────────────────────
+
+func TestMapNewTypeChecks(t *testing.T) {
+	mustCompile(t, `fn f() -> unit {
+		let mut m: map<str, i64> = map_new()
+		return unit
+	}`)
+}
+
+func TestMapInsertTypeChecks(t *testing.T) {
+	mustCompile(t, `fn f() -> unit {
+		let mut m: map<str, i64> = map_new()
+		map_insert(m, "hello", 42)
+		return unit
+	}`)
+}
+
+func TestMapGetReturnsOption(t *testing.T) {
+	mustCompile(t, `fn f() -> unit {
+		let mut m: map<str, i64> = map_new()
+		map_insert(m, "x", 1)
+		let v = map_get(m, "x") must {
+			some(n) => n
+			none    => 0
+		}
+		return unit
+	}`)
+}
+
+func TestMapRemoveReturnsBool(t *testing.T) {
+	mustCompile(t, `fn f() -> unit {
+		let mut m: map<str, i64> = map_new()
+		let _removed: bool = map_remove(m, "x")
+		return unit
+	}`)
+}
+
+func TestMapLenReturnsInt(t *testing.T) {
+	mustCompile(t, `fn f() -> unit {
+		let mut m: map<str, i64> = map_new()
+		let _n: u64 = map_len(m)
+		return unit
+	}`)
+}
+
+func TestMapContainsReturnsBool(t *testing.T) {
+	mustCompile(t, `fn f() -> unit {
+		let mut m: map<str, i64> = map_new()
+		let _b: bool = map_contains(m, "x")
+		return unit
+	}`)
+}
+
+func TestMapNewRequiresTypeAnnotation(t *testing.T) {
+	mustFail(t, `fn f() -> unit {
+		let _m = map_new()
+		return unit
+	}`, "type annotation")
+}
+
+func TestMapInsertWrongKeyType(t *testing.T) {
+	mustFail(t, `fn f() -> unit {
+		let mut m: map<str, i64> = map_new()
+		map_insert(m, 42, 1)
+		return unit
+	}`, "key type")
+}

@@ -1477,3 +1477,184 @@ fn main() -> unit {
 		t.Fatalf("got %q, want %q", got, "42\n")
 	}
 }
+
+// ── map<K,V> integration tests ────────────────────────────────────────────────
+
+func TestMapBasicInsertGet(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+	let mut m: map<str, i64> = map_new()
+	map_insert(m, "x", 42)
+	let v = map_get(m, "x") must {
+		some(n) => n
+		none    => 0
+	}
+	print_int(v)
+	return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "map_insert_get", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "42\n" {
+		t.Fatalf("got %q, want %q", got, "42\n")
+	}
+}
+
+func TestMapMissReturnsNone(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+	let mut m: map<str, i64> = map_new()
+	let v = map_get(m, "missing") must {
+		some(n) => n
+		none    => -1
+	}
+	print_int(v)
+	return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "map_miss", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "-1\n" {
+		t.Fatalf("got %q, want %q", got, "-1\n")
+	}
+}
+
+func TestMapOverwrite(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+	let mut m: map<str, i64> = map_new()
+	map_insert(m, "k", 1)
+	map_insert(m, "k", 2)
+	let v = map_get(m, "k") must {
+		some(n) => n
+		none    => 0
+	}
+	print_int(v)
+	return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "map_overwrite", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "2\n" {
+		t.Fatalf("got %q, want %q", got, "2\n")
+	}
+}
+
+func TestMapLen(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+	let mut m: map<str, i64> = map_new()
+	map_insert(m, "a", 1)
+	map_insert(m, "b", 2)
+	map_insert(m, "c", 3)
+	print_bool(map_len(m) == 3)
+	return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "map_len", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "true\n" {
+		t.Fatalf("got %q, want %q", got, "true\n")
+	}
+}
+
+func TestMapContains(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+	let mut m: map<str, i64> = map_new()
+	map_insert(m, "yes", 1)
+	if map_contains(m, "yes") { print("found") }
+	if map_contains(m, "no") { print("should not print") }
+	return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "map_contains", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "found\n" {
+		t.Fatalf("got %q, want %q", got, "found\n")
+	}
+}
+
+func TestMapRemove(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+	let mut m: map<str, i64> = map_new()
+	map_insert(m, "k", 99)
+	let _removed: bool = map_remove(m, "k")
+	let v = map_get(m, "k") must {
+		some(n) => n
+		none    => -1
+	}
+	print_int(v)
+	return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "map_remove", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "-1\n" {
+		t.Fatalf("got %q, want %q", got, "-1\n")
+	}
+}
+
+func TestMapIntKey(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+	let mut m: map<i64, str> = map_new()
+	map_insert(m, 1, "one")
+	map_insert(m, 2, "two")
+	let v = map_get(m, 1) must {
+		some(s) => s
+		none    => "?"
+	}
+	print(v)
+	return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "map_int_key", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "one\n" {
+		t.Fatalf("got %q, want %q", got, "one\n")
+	}
+}

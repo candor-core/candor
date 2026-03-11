@@ -801,6 +801,18 @@ func (c *checker) inferExpr(expr parser.Expr, sc *scope, hint Type) (Type, error
 				return c.inferVecPush(e, ident, sc)
 			case "vec_len":
 				return c.inferVecLen(e, ident, sc)
+			case "map_new":
+				return c.inferMapNew(e, ident, sc, hint)
+			case "map_insert":
+				return c.inferMapInsert(e, ident, sc)
+			case "map_get":
+				return c.inferMapGet(e, ident, sc)
+			case "map_remove":
+				return c.inferMapRemove(e, ident, sc)
+			case "map_len":
+				return c.inferMapLen(e, ident, sc)
+			case "map_contains":
+				return c.inferMapContains(e, ident, sc)
 			case "refmut":
 				return c.inferRefmutCall(e, sc)
 			}
@@ -1368,6 +1380,147 @@ func (c *checker) inferVecLen(e *parser.CallExpr, fn *parser.IdentExpr, sc *scop
 	}
 	c.record(fn, TU64)
 	return TU64, nil
+}
+
+// ── map built-in functions ────────────────────────────────────────────────────
+
+func (c *checker) inferMapNew(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope, hint Type) (Type, error) {
+	if len(e.Args) != 0 {
+		return nil, c.errorf(e.LParen, "map_new() takes no arguments")
+	}
+	var keyType, valType Type
+	if gen, ok := hint.(*GenType); ok && gen.Con == "map" && len(gen.Params) == 2 {
+		keyType = gen.Params[0]
+		valType = gen.Params[1]
+	}
+	if keyType == nil || valType == nil {
+		return nil, c.errorf(fn.Tok, "map_new() requires a type annotation to infer key/value types")
+	}
+	t := &GenType{Con: "map", Params: []Type{keyType, valType}}
+	c.record(fn, t)
+	return t, nil
+}
+
+func (c *checker) inferMapInsert(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 3 {
+		return nil, c.errorf(e.LParen, "map_insert() takes 3 arguments: (map, key, value)")
+	}
+	mapType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := mapType.(*GenType)
+	if !ok || gen.Con != "map" || len(gen.Params) != 2 {
+		return nil, c.errorf(e.Args[0].Pos(), "map_insert() first argument must be map<K,V>, got %s", mapType)
+	}
+	keyType, valType := gen.Params[0], gen.Params[1]
+	kt, err := c.checkExpr(e.Args[1], sc, keyType)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := Coerce(kt, keyType); !ok {
+		return nil, c.errorf(e.Args[1].Pos(), "map_insert() key type %s does not match map key type %s", kt, keyType)
+	}
+	vt, err := c.checkExpr(e.Args[2], sc, valType)
+	if err != nil {
+		return nil, err
+	}
+	if coerced, ok2 := Coerce(vt, valType); ok2 {
+		c.exprTypes[e.Args[2]] = coerced
+	} else {
+		return nil, c.errorf(e.Args[2].Pos(), "map_insert() value type %s does not match map value type %s", vt, valType)
+	}
+	c.record(fn, TUnit)
+	return TUnit, nil
+}
+
+func (c *checker) inferMapGet(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 2 {
+		return nil, c.errorf(e.LParen, "map_get() takes 2 arguments: (map, key)")
+	}
+	mapType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := mapType.(*GenType)
+	if !ok || gen.Con != "map" || len(gen.Params) != 2 {
+		return nil, c.errorf(e.Args[0].Pos(), "map_get() first argument must be map<K,V>, got %s", mapType)
+	}
+	keyType, valType := gen.Params[0], gen.Params[1]
+	kt, err := c.checkExpr(e.Args[1], sc, keyType)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := Coerce(kt, keyType); !ok {
+		return nil, c.errorf(e.Args[1].Pos(), "map_get() key type %s does not match map key type %s", kt, keyType)
+	}
+	retType := &GenType{Con: "option", Params: []Type{valType}}
+	c.record(fn, retType)
+	return retType, nil
+}
+
+func (c *checker) inferMapRemove(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 2 {
+		return nil, c.errorf(e.LParen, "map_remove() takes 2 arguments: (map, key)")
+	}
+	mapType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := mapType.(*GenType)
+	if !ok || gen.Con != "map" || len(gen.Params) != 2 {
+		return nil, c.errorf(e.Args[0].Pos(), "map_remove() first argument must be map<K,V>, got %s", mapType)
+	}
+	keyType := gen.Params[0]
+	kt, err := c.checkExpr(e.Args[1], sc, keyType)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := Coerce(kt, keyType); !ok {
+		return nil, c.errorf(e.Args[1].Pos(), "map_remove() key type %s does not match map key type %s", kt, keyType)
+	}
+	c.record(fn, TBool)
+	return TBool, nil
+}
+
+func (c *checker) inferMapLen(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 1 {
+		return nil, c.errorf(e.LParen, "map_len() takes 1 argument")
+	}
+	mapType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := mapType.(*GenType)
+	if !ok || gen.Con != "map" || len(gen.Params) != 2 {
+		return nil, c.errorf(e.Args[0].Pos(), "map_len() requires map<K,V>, got %s", mapType)
+	}
+	c.record(fn, TU64)
+	return TU64, nil
+}
+
+func (c *checker) inferMapContains(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 2 {
+		return nil, c.errorf(e.LParen, "map_contains() takes 2 arguments: (map, key)")
+	}
+	mapType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := mapType.(*GenType)
+	if !ok || gen.Con != "map" || len(gen.Params) != 2 {
+		return nil, c.errorf(e.Args[0].Pos(), "map_contains() requires map<K,V>, got %s", mapType)
+	}
+	keyType := gen.Params[0]
+	kt, err := c.checkExpr(e.Args[1], sc, keyType)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := Coerce(kt, keyType); !ok {
+		return nil, c.errorf(e.Args[1].Pos(), "map_contains() key type %s does not match map key type %s", kt, keyType)
+	}
+	c.record(fn, TBool)
+	return TBool, nil
 }
 
 func (c *checker) inferConstructorCall(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope, hint Type) (Type, error) {

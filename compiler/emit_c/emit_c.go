@@ -79,6 +79,11 @@ func (e *emitter) emitFile(file *parser.File) error {
 		return err
 	}
 
+	// Emit map<K,V> struct typedefs and operation helpers used in this file.
+	if err := e.emitMapStructs(); err != nil {
+		return err
+	}
+
 	// Forward-declare all structs first so they can reference each other.
 	for _, decl := range file.Decls {
 		if d, ok := decl.(*parser.StructDecl); ok {
@@ -145,6 +150,47 @@ func (e *emitter) vecTypeName(elemC string) string {
 
 func (e *emitter) vecPushName(elemC string) string {
 	return "_cnd_vec_push_" + e.vecElemMangle(elemC)
+}
+
+func (e *emitter) mapMangle(s string) string {
+	r := strings.NewReplacer(" ", "_", "*", "ptr", "<", "_", ">", "_", ",", "_")
+	return r.Replace(s)
+}
+
+func (e *emitter) mapTypeName(kC, vC string) string {
+	return "_CndMap_" + e.mapMangle(kC) + "_" + e.mapMangle(vC)
+}
+
+func (e *emitter) mapEntryName(kC, vC string) string {
+	return "_CndMapEntry_" + e.mapMangle(kC) + "_" + e.mapMangle(vC)
+}
+
+func (e *emitter) mapHashFnName(kC string) string {
+	return "_cnd_map_hash_" + e.mapMangle(kC)
+}
+
+func (e *emitter) mapEqFnName(kC string) string {
+	return "_cnd_map_eq_" + e.mapMangle(kC)
+}
+
+func (e *emitter) mapNewFnName(kC, vC string) string {
+	return "_cnd_map_new_" + e.mapMangle(kC) + "_" + e.mapMangle(vC)
+}
+
+func (e *emitter) mapInsertFnName(kC, vC string) string {
+	return "_cnd_map_insert_" + e.mapMangle(kC) + "_" + e.mapMangle(vC)
+}
+
+func (e *emitter) mapGetFnName(kC, vC string) string {
+	return "_cnd_map_get_" + e.mapMangle(kC) + "_" + e.mapMangle(vC)
+}
+
+func (e *emitter) mapRemoveFnName(kC, vC string) string {
+	return "_cnd_map_remove_" + e.mapMangle(kC) + "_" + e.mapMangle(vC)
+}
+
+func (e *emitter) mapContainsFnName(kC, vC string) string {
+	return "_cnd_map_contains_" + e.mapMangle(kC) + "_" + e.mapMangle(vC)
 }
 
 // ── fn(...)->... typedef helpers ──────────────────────────────────────────────
@@ -294,6 +340,125 @@ func (e *emitter) emitVecStructs() error {
 		e.writef("}\n")
 	}
 	if len(seen) > 0 {
+		e.writeln("")
+	}
+	return nil
+}
+
+func (e *emitter) emitMapStructs() error {
+	seenMaps := map[string]bool{}
+	seenKeys := map[string]bool{}
+	for _, t := range e.res.ExprTypes {
+		gen, ok := t.(*typeck.GenType)
+		if !ok || gen.Con != "map" || len(gen.Params) != 2 {
+			continue
+		}
+		kC, err := e.cType(gen.Params[0])
+		if err != nil {
+			continue
+		}
+		vC, err := e.cType(gen.Params[1])
+		if err != nil {
+			continue
+		}
+		mapName := e.mapTypeName(kC, vC)
+		if seenMaps[mapName] {
+			continue
+		}
+		seenMaps[mapName] = true
+
+		entryName := e.mapEntryName(kC, vC)
+		hashFn := e.mapHashFnName(kC)
+		eqFn := e.mapEqFnName(kC)
+		newFn := e.mapNewFnName(kC, vC)
+		insertFn := e.mapInsertFnName(kC, vC)
+		getFn := e.mapGetFnName(kC, vC)
+		removeFn := e.mapRemoveFnName(kC, vC)
+		containsFn := e.mapContainsFnName(kC, vC)
+
+		// Hash and equality helpers (once per key type)
+		if !seenKeys[kC] {
+			seenKeys[kC] = true
+			if kC == "const char*" {
+				e.writef("static inline uint64_t %s(const char* k) {\n", hashFn)
+				e.writef("    uint64_t h = 5381; while (*k) h = ((h << 5) + h) ^ (unsigned char)*k++; return h;\n")
+				e.writef("}\n")
+				e.writef("static inline int %s(const char* a, const char* b) { return strcmp(a, b) == 0; }\n", eqFn)
+			} else {
+				e.writef("static inline uint64_t %s(%s k) {\n", hashFn, kC)
+				e.writef("    uint64_t h = (uint64_t)k;\n")
+				e.writef("    h ^= h >> 33; h *= 0xff51afd7ed558ccdULL; h ^= h >> 33; return h;\n")
+				e.writef("}\n")
+				e.writef("static inline int %s(%s a, %s b) { return a == b; }\n", eqFn, kC, kC)
+			}
+		}
+
+		// Entry struct (forward declare first so struct pointer works)
+		e.writef("typedef struct %s { %s _key; %s _val; struct %s* _next; } %s;\n",
+			entryName, kC, vC, entryName, entryName)
+		// Map struct
+		e.writef("typedef struct { %s** _buckets; uint64_t _len; uint64_t _cap; } %s;\n",
+			entryName, mapName)
+
+		// map_new
+		e.writef("static inline %s %s(void) {\n", mapName, newFn)
+		e.writef("    uint64_t _cap = 16;\n")
+		e.writef("    %s** _b = (%s**)calloc(_cap, sizeof(%s*));\n", entryName, entryName, entryName)
+		e.writef("    return (%s){ _b, 0, _cap };\n", mapName)
+		e.writef("}\n")
+
+		// map_insert
+		e.writef("static inline void %s(%s* m, %s k, %s v) {\n", insertFn, mapName, kC, vC)
+		e.writef("    if (m->_len * 4 >= m->_cap * 3) {\n")
+		e.writef("        uint64_t _nc = m->_cap * 2;\n")
+		e.writef("        %s** _nb = (%s**)calloc(_nc, sizeof(%s*));\n", entryName, entryName, entryName)
+		e.writef("        for (uint64_t _i = 0; _i < m->_cap; _i++) {\n")
+		e.writef("            %s* _en = m->_buckets[_i];\n", entryName)
+		e.writef("            while (_en) { %s* _nx = _en->_next; uint64_t _bi2 = %s(_en->_key) %% _nc; _en->_next = _nb[_bi2]; _nb[_bi2] = _en; _en = _nx; }\n", entryName, hashFn)
+		e.writef("        }\n")
+		e.writef("        free(m->_buckets); m->_buckets = _nb; m->_cap = _nc;\n")
+		e.writef("    }\n")
+		e.writef("    uint64_t _bi = %s(k) %% m->_cap;\n", hashFn)
+		e.writef("    %s* _en = m->_buckets[_bi];\n", entryName)
+		e.writef("    while (_en) { if (%s(_en->_key, k)) { _en->_val = v; return; } _en = _en->_next; }\n", eqFn)
+		e.writef("    %s* _ne = (%s*)malloc(sizeof(%s));\n", entryName, entryName, entryName)
+		e.writef("    _ne->_key = k; _ne->_val = v; _ne->_next = m->_buckets[_bi]; m->_buckets[_bi] = _ne; m->_len++;\n")
+		e.writef("}\n")
+
+		// map_get → option<V> = V* (NULL = none)
+		e.writef("static inline %s* %s(%s m, %s k) {\n", vC, getFn, mapName, kC)
+		e.writef("    if (!m._buckets) return NULL;\n")
+		e.writef("    uint64_t _bi = %s(k) %% m._cap;\n", hashFn)
+		e.writef("    %s* _en = m._buckets[_bi];\n", entryName)
+		e.writef("    while (_en) {\n")
+		e.writef("        if (%s(_en->_key, k)) { %s* _p = (%s*)malloc(sizeof(%s)); *_p = _en->_val; return _p; }\n", eqFn, vC, vC, vC)
+		e.writef("        _en = _en->_next;\n")
+		e.writef("    }\n")
+		e.writef("    return NULL;\n")
+		e.writef("}\n")
+
+		// map_remove → bool (int)
+		e.writef("static inline int %s(%s* m, %s k) {\n", removeFn, mapName, kC)
+		e.writef("    if (!m->_buckets) return 0;\n")
+		e.writef("    uint64_t _bi = %s(k) %% m->_cap;\n", hashFn)
+		e.writef("    %s** _pp = &m->_buckets[_bi];\n", entryName)
+		e.writef("    while (*_pp) {\n")
+		e.writef("        if (%s((*_pp)->_key, k)) { %s* _dead = *_pp; *_pp = _dead->_next; free(_dead); m->_len--; return 1; }\n", eqFn, entryName)
+		e.writef("        _pp = &(*_pp)->_next;\n")
+		e.writef("    }\n")
+		e.writef("    return 0;\n")
+		e.writef("}\n")
+
+		// map_contains → bool (int), no allocation
+		e.writef("static inline int %s(%s m, %s k) {\n", containsFn, mapName, kC)
+		e.writef("    if (!m._buckets) return 0;\n")
+		e.writef("    uint64_t _bi = %s(k) %% m._cap;\n", hashFn)
+		e.writef("    %s* _en = m._buckets[_bi];\n", entryName)
+		e.writef("    while (_en) { if (%s(_en->_key, k)) return 1; _en = _en->_next; }\n", eqFn)
+		e.writef("    return 0;\n")
+		e.writef("}\n")
+	}
+	if len(seenMaps) > 0 {
 		e.writeln("")
 	}
 	return nil
@@ -967,6 +1132,21 @@ func (e *emitter) emitExpr(expr parser.Expr, sb *strings.Builder) error {
 					return nil
 				}
 			}
+			if ident.Tok.Lexeme == "map_new" {
+				t := e.res.ExprTypes[ident]
+				if gen, ok2 := t.(*typeck.GenType); ok2 && gen.Con == "map" && len(gen.Params) == 2 {
+					kC, err := e.cType(gen.Params[0])
+					if err != nil {
+						return err
+					}
+					vC, err := e.cType(gen.Params[1])
+					if err != nil {
+						return err
+					}
+					fmt.Fprintf(sb, "%s()", e.mapNewFnName(kC, vC))
+					return nil
+				}
+			}
 			if handled, err := e.emitBuiltinCall(ident.Tok.Lexeme, ex.Args, sb); handled {
 				return err
 			}
@@ -1104,6 +1284,138 @@ func (e *emitter) emitBuiltinCall(name string, args []parser.Expr, sb *strings.B
 			return true, err
 		}
 		sb.WriteString(")._len")
+		return true, nil
+
+	case "map_insert":
+		// map_insert(m, k, v) → _cnd_map_insert_KM_VM(&(m), k, v)
+		if len(args) != 3 {
+			return false, nil
+		}
+		mapType, ok := e.res.ExprTypes[args[0]].(*typeck.GenType)
+		if !ok || mapType.Con != "map" || len(mapType.Params) != 2 {
+			return false, nil
+		}
+		kC, err := e.cType(mapType.Params[0])
+		if err != nil {
+			return true, err
+		}
+		vC, err := e.cType(mapType.Params[1])
+		if err != nil {
+			return true, err
+		}
+		sb.WriteString(e.mapInsertFnName(kC, vC))
+		sb.WriteString("(&(")
+		if err := e.emitExpr(args[0], sb); err != nil {
+			return true, err
+		}
+		sb.WriteString("), ")
+		if err := e.emitExpr(args[1], sb); err != nil {
+			return true, err
+		}
+		sb.WriteString(", ")
+		if err := e.emitExpr(args[2], sb); err != nil {
+			return true, err
+		}
+		sb.WriteByte(')')
+		return true, nil
+
+	case "map_get":
+		// map_get(m, k) → _cnd_map_get_KM_VM(m, k)
+		if len(args) != 2 {
+			return false, nil
+		}
+		mapType, ok := e.res.ExprTypes[args[0]].(*typeck.GenType)
+		if !ok || mapType.Con != "map" || len(mapType.Params) != 2 {
+			return false, nil
+		}
+		kC, err := e.cType(mapType.Params[0])
+		if err != nil {
+			return true, err
+		}
+		vC, err := e.cType(mapType.Params[1])
+		if err != nil {
+			return true, err
+		}
+		sb.WriteString(e.mapGetFnName(kC, vC))
+		sb.WriteByte('(')
+		if err := e.emitExpr(args[0], sb); err != nil {
+			return true, err
+		}
+		sb.WriteString(", ")
+		if err := e.emitExpr(args[1], sb); err != nil {
+			return true, err
+		}
+		sb.WriteByte(')')
+		return true, nil
+
+	case "map_remove":
+		// map_remove(m, k) → _cnd_map_remove_KM_VM(&(m), k)
+		if len(args) != 2 {
+			return false, nil
+		}
+		mapType, ok := e.res.ExprTypes[args[0]].(*typeck.GenType)
+		if !ok || mapType.Con != "map" || len(mapType.Params) != 2 {
+			return false, nil
+		}
+		kC, err := e.cType(mapType.Params[0])
+		if err != nil {
+			return true, err
+		}
+		vC, err := e.cType(mapType.Params[1])
+		if err != nil {
+			return true, err
+		}
+		sb.WriteString(e.mapRemoveFnName(kC, vC))
+		sb.WriteString("(&(")
+		if err := e.emitExpr(args[0], sb); err != nil {
+			return true, err
+		}
+		sb.WriteString("), ")
+		if err := e.emitExpr(args[1], sb); err != nil {
+			return true, err
+		}
+		sb.WriteByte(')')
+		return true, nil
+
+	case "map_len":
+		// map_len(m) → (m)._len
+		if len(args) != 1 {
+			return false, nil
+		}
+		sb.WriteByte('(')
+		if err := e.emitExpr(args[0], sb); err != nil {
+			return true, err
+		}
+		sb.WriteString(")._len")
+		return true, nil
+
+	case "map_contains":
+		// map_contains(m, k) → _cnd_map_contains_KM_VM(m, k)
+		if len(args) != 2 {
+			return false, nil
+		}
+		mapType, ok := e.res.ExprTypes[args[0]].(*typeck.GenType)
+		if !ok || mapType.Con != "map" || len(mapType.Params) != 2 {
+			return false, nil
+		}
+		kC, err := e.cType(mapType.Params[0])
+		if err != nil {
+			return true, err
+		}
+		vC, err := e.cType(mapType.Params[1])
+		if err != nil {
+			return true, err
+		}
+		sb.WriteString(e.mapContainsFnName(kC, vC))
+		sb.WriteByte('(')
+		if err := e.emitExpr(args[0], sb); err != nil {
+			return true, err
+		}
+		sb.WriteString(", ")
+		if err := e.emitExpr(args[1], sb); err != nil {
+			return true, err
+		}
+		sb.WriteByte(')')
 		return true, nil
 	}
 
@@ -1783,6 +2095,18 @@ func (e *emitter) cType(t typeck.Type) (string, error) {
 					return "", err
 				}
 				return e.vecTypeName(inner), nil
+			}
+		case "map":
+			if len(tt.Params) == 2 {
+				kC, err := e.cType(tt.Params[0])
+				if err != nil {
+					return "", err
+				}
+				vC, err := e.cType(tt.Params[1])
+				if err != nil {
+					return "", err
+				}
+				return e.mapTypeName(kC, vC), nil
 			}
 		case "ring":
 			if len(tt.Params) == 1 {
