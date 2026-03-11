@@ -1477,6 +1477,26 @@ func (e *emitter) emitConstructorCall(ex *parser.CallExpr, fn *parser.IdentExpr,
 			return true, err
 		}
 		return true, nil
+
+	case lexer.TokSecret:
+		// secret(x) — wraps in secret<T>; transparent at runtime, just emits x
+		if len(ex.Args) != 1 {
+			return false, nil
+		}
+		if err := e.emitExpr(ex.Args[0], sb); err != nil {
+			return true, err
+		}
+		return true, nil
+
+	case lexer.TokReveal:
+		// reveal(s) — explicitly unwraps secret<T> to T; transparent at runtime
+		if len(ex.Args) != 1 {
+			return false, nil
+		}
+		if err := e.emitExpr(ex.Args[0], sb); err != nil {
+			return true, err
+		}
+		return true, nil
 	}
 	// refmut(x) — mutable reference constructor; in C emits &x
 	if fn.Tok.Lexeme == "refmut" && len(ex.Args) == 1 {
@@ -1783,6 +1803,11 @@ func (e *emitter) cType(t typeck.Type) (string, error) {
 		case "result":
 			if len(tt.Params) == 2 {
 				return e.resultTypeName(tt)
+			}
+		case "secret":
+			// secret<T> is transparent at runtime — same representation as T
+			if len(tt.Params) == 1 {
+				return e.cType(tt.Params[0])
 			}
 		}
 		return "", fmt.Errorf("unsupported generic type: %s", t)

@@ -56,6 +56,8 @@ const (
 	TokModule
 	TokUse
 	TokMut
+	TokSecret
+	TokReveal
 
 	// --- Punctuation & Operators ---
 	TokLParen    // (
@@ -140,7 +142,9 @@ var keywords = map[string]TokenType{
 	"assert":    TokAssert,
 	"module":    TokModule,
 	"use":       TokUse,
-	"mut":       TokMut,
+	"mut":    TokMut,
+	"secret": TokSecret,
+	"reveal": TokReveal,
 }
 
 // Token is a single lexical unit from a .cnd source file.
@@ -198,7 +202,9 @@ var tokenNames = map[TokenType]string{
 	TokAssert:    "assert",
 	TokModule:    "module",
 	TokUse:       "use",
-	TokMut:       "mut",
+	TokMut:    "mut",
+	TokSecret: "secret",
+	TokReveal: "reveal",
 	TokLParen:    "(",
 	TokRParen:    ")",
 	TokLBrace:    "{",

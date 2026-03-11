@@ -1256,6 +1256,67 @@ fn main() -> unit {
 	}
 }
 
+// ── secret<T> enforcement ─────────────────────────────────────────────────────
+
+func TestSecretConstruct(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let _s = secret("password123")
+    return unit
+}`)
+}
+
+func TestSecretRevealExplicit(t *testing.T) {
+	mustCompile(t, `
+fn main() -> unit {
+    let s = secret("password123")
+    let _plain: str = reveal(s)
+    return unit
+}`)
+}
+
+func TestSecretPassToPure(t *testing.T) {
+	// secret<T> may be passed to a pure function.
+	mustCompile(t, `
+fn hash(s: secret<str>) -> i64 effects [] { return 42 }
+fn main() -> unit {
+    let s = secret("password")
+    let _h = hash(s)
+    return unit
+}`)
+}
+
+func TestSecretPassToImpureFails(t *testing.T) {
+	// Passing secret<T> directly to an impure function must fail.
+	mustFail(t, `
+fn log_val(s: str) -> unit { return unit }
+fn main() -> unit {
+    let s = secret("password")
+    log_val(s)
+    return unit
+}`, "non-pure")
+}
+
+func TestSecretRevealPassToImpureOk(t *testing.T) {
+	// reveal() is the explicit unwrap — passing revealed value to impure is allowed.
+	mustCompile(t, `
+fn log_value(s: str) -> unit { return unit }
+fn main() -> unit {
+    let s = secret("password")
+    log_value(reveal(s))
+    return unit
+}`)
+}
+
+func TestRevealNonSecretFails(t *testing.T) {
+	mustFail(t, `
+fn main() -> unit {
+    let x: str = "hello"
+    let _r = reveal(x)
+    return unit
+}`, "secret<T>")
+}
+
 func TestComptimeChained(t *testing.T) {
 	// Pure calls with pure-call results as args should chain.
 	src := `

@@ -938,7 +938,7 @@ func (p *parser) parsePrimaryExpr() (Expr, error) {
 		}
 		return &IdentExpr{Tok: t}, nil
 	// These keywords also appear as expression values.
-	case lexer.TokSome, lexer.TokNone, lexer.TokOk, lexer.TokErr, lexer.TokMove:
+	case lexer.TokSome, lexer.TokNone, lexer.TokOk, lexer.TokErr, lexer.TokMove, lexer.TokSecret, lexer.TokReveal:
 		p.advance()
 		return &IdentExpr{Tok: t}, nil
 	case lexer.TokMatch:
@@ -979,7 +979,8 @@ func (p *parser) parsePrimaryExpr() (Expr, error) {
 func (p *parser) parseType() (TypeExpr, error) {
 	t := p.peek()
 	switch t.Type {
-	case lexer.TokIdent:
+	case lexer.TokIdent, lexer.TokSecret:
+		// `secret` is a keyword but also valid as a generic type constructor.
 		name := p.advance()
 		if p.check(lexer.TokLt) {
 			return p.parseGenericType(name)

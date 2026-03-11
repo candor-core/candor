@@ -1331,6 +1331,55 @@ fn main() -> unit {
 
 // ── Comptime integration tests ────────────────────────────────────────────────
 
+// ── secret<T> integration tests ──────────────────────────────────────────────
+
+func TestSecretRevealRoundTrip(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+    let s = secret("classified")
+    let plain: str = reveal(s)
+    print(plain)
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "secret_reveal", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "classified\n" {
+		t.Fatalf("got %q, want %q", got, "classified\n")
+	}
+}
+
+func TestSecretPureFunction(t *testing.T) {
+	skipIfNoCC(t)
+	// A pure function can accept secret<str> — no reveal needed inside.
+	src := `
+fn secret_len(s: secret<str>) -> i64 effects [] {
+    return str_len(reveal(s))
+}
+fn main() -> unit {
+    let s = secret("hello")
+    print_int(secret_len(s))
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "secret_pure", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "5\n" {
+		t.Fatalf("got %q, want %q", got, "5\n")
+	}
+}
+
 func TestComptimeSquare(t *testing.T) {
 	skipIfNoCC(t)
 	src := `

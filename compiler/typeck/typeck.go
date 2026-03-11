@@ -789,6 +789,10 @@ func (c *checker) inferExpr(expr parser.Expr, sc *scope, hint Type) (Type, error
 				return c.inferConstructorCall(e, ident, sc, hint)
 			case lexer.TokMove:
 				return c.inferMoveCall(e, sc)
+			case lexer.TokSecret:
+				return c.inferSecretCall(e, sc)
+			case lexer.TokReveal:
+				return c.inferRevealCall(e, sc)
 			}
 			switch ident.Tok.Lexeme {
 			case "vec_new":
@@ -1003,10 +1007,22 @@ func (c *checker) inferCallExpr(e *parser.CallExpr, sc *scope) (Type, error) {
 		return nil, c.errorf(e.LParen,
 			"argument count mismatch: expected %d, got %d", len(sig.Params), len(e.Args))
 	}
+	// Determine callee purity for secret<T> enforcement.
+	var calleePure bool
+	if ident, ok2 := e.Fn.(*parser.IdentExpr); ok2 {
+		if eff := c.fnEffects[ident.Tok.Lexeme]; eff != nil && eff.Kind == parser.EffectsPure {
+			calleePure = true
+		}
+	}
 	for i, arg := range e.Args {
 		argType, err := c.checkExpr(arg, sc, sig.Params[i])
 		if err != nil {
 			return nil, err
+		}
+		// secret<T> may only be passed to pure (effects []) functions.
+		if gen, ok := argType.(*GenType); ok && gen.Con == "secret" && !calleePure {
+			return nil, c.errorf(arg.Pos(),
+				"secret<T> value cannot be passed to a non-pure function; use reveal() to unwrap explicitly")
 		}
 		coerced, ok := Coerce(argType, sig.Params[i])
 		if !ok {
@@ -1434,6 +1450,45 @@ func (c *checker) inferConstructorCall(e *parser.CallExpr, fn *parser.IdentExpr,
 		return t, nil
 	}
 	return nil, fmt.Errorf("unreachable constructor")
+}
+
+// inferSecretCall handles secret(x) — wraps x in secret<T>; prevents I/O leakage.
+func (c *checker) inferSecretCall(e *parser.CallExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 1 {
+		return nil, c.errorf(e.LParen, "secret() takes 1 argument")
+	}
+	t, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	secretType := &GenType{Con: "secret", Params: []Type{t}}
+	if fn, ok := e.Fn.(*parser.IdentExpr); ok {
+		c.record(fn, secretType)
+	}
+	c.record(e, secretType)
+	return secretType, nil
+}
+
+// inferRevealCall handles reveal(s) — explicitly unwraps secret<T> to T.
+// This is an auditable operation: every reveal() call is visible in source.
+func (c *checker) inferRevealCall(e *parser.CallExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 1 {
+		return nil, c.errorf(e.LParen, "reveal() takes 1 argument")
+	}
+	t, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := t.(*GenType)
+	if !ok || gen.Con != "secret" || len(gen.Params) == 0 {
+		return nil, c.errorf(e.LParen, "reveal() requires secret<T>, got %s", t)
+	}
+	inner := gen.Params[0]
+	if fn, ok := e.Fn.(*parser.IdentExpr); ok {
+		c.record(fn, inner)
+	}
+	c.record(e, inner)
+	return inner, nil
 }
 
 // inferMoveCall handles move(x) — semantically transfers ownership; type is T.

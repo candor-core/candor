@@ -48,7 +48,8 @@
       "Bash(go test ./tests/... -run \"TestMoveIntegration\" -v)",
       "Bash(go test ./typeck/... -run \"TestComptime\" -v)",
       "Bash(go test ./tests/... -run \"TestComptime\" -v)",
-      "Bash(go test ./tests/... -run \"TestComptimeSquare\" -v)"
+      "Bash(go test ./tests/... -run \"TestComptimeSquare\" -v)",
+      "Bash(go test ./typeck/... -run \"TestSecret|TestReveal\" -v)"
     ]
   }
 }
