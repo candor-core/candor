@@ -1,0 +1,678 @@
+## candor_parser.cnd - A structural Candor parser written in Candor
+## Reads Candor source from stdin, prints fn and struct declarations with summaries.
+
+## ── token kind constants ──────────────────────────────────────────────────────
+fn TK_IDENT()    -> i64 pure { return 1 }
+fn TK_INT()      -> i64 pure { return 2 }
+fn TK_STR()      -> i64 pure { return 3 }
+fn TK_PLUS()     -> i64 pure { return 4 }
+fn TK_MINUS()    -> i64 pure { return 5 }
+fn TK_STAR()     -> i64 pure { return 6 }
+fn TK_SLASH()    -> i64 pure { return 7 }
+fn TK_PERCENT()  -> i64 pure { return 8 }
+fn TK_EQEQ()     -> i64 pure { return 9 }
+fn TK_BANGEQ()   -> i64 pure { return 10 }
+fn TK_LT()       -> i64 pure { return 11 }
+fn TK_LTEQ()     -> i64 pure { return 12 }
+fn TK_GT()       -> i64 pure { return 13 }
+fn TK_GTEQ()     -> i64 pure { return 14 }
+fn TK_EQ()       -> i64 pure { return 15 }
+fn TK_ARROW()    -> i64 pure { return 16 }
+fn TK_LBRACE()   -> i64 pure { return 17 }
+fn TK_RBRACE()   -> i64 pure { return 18 }
+fn TK_LPAREN()   -> i64 pure { return 19 }
+fn TK_RPAREN()   -> i64 pure { return 20 }
+fn TK_LBRACKET() -> i64 pure { return 21 }
+fn TK_RBRACKET() -> i64 pure { return 22 }
+fn TK_COMMA()    -> i64 pure { return 23 }
+fn TK_COLON()    -> i64 pure { return 24 }
+fn TK_DOT()      -> i64 pure { return 25 }
+fn TK_AMP()      -> i64 pure { return 26 }
+fn TK_EOF()      -> i64 pure { return 27 }
+fn TK_ERROR()    -> i64 pure { return 28 }
+fn TK_KW()       -> i64 pure { return 100 }
+
+## ── char helpers ──────────────────────────────────────────────────────────────
+fn is_alpha(c: u8) -> bool pure {
+    return (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or c == 95
+}
+
+fn is_digit(c: u8) -> bool pure {
+    return c >= 48 and c <= 57
+}
+
+fn is_alnum(c: u8) -> bool pure {
+    return is_alpha(c) or is_digit(c)
+}
+
+## ── token and lexer structs ───────────────────────────────────────────────────
+struct Token {
+    kind:   i64
+    lexeme: str
+    line:   i64
+}
+
+struct Lexer {
+    src:     str
+    src_len: i64
+    pos:     i64
+    line:    i64
+}
+
+fn make_tok(kind: i64, lexeme: str, line: i64) -> Token {
+    return Token{ kind: kind, lexeme: lexeme, line: line }
+}
+
+## ── lexer primitives ─────────────────────────────────────────────────────────
+fn at_end(l: ref<Lexer>) -> bool {
+    return l.pos >= l.src_len
+}
+
+fn peek_c(l: ref<Lexer>) -> u8 {
+    if l.pos >= l.src_len { return 0 }
+    return l.src[l.pos]
+}
+
+fn peek2_c(l: ref<Lexer>) -> u8 {
+    if l.pos + 1 >= l.src_len { return 0 }
+    return l.src[l.pos + 1]
+}
+
+fn advance_c(l: refmut<Lexer>) -> u8 {
+    let c = l.src[l.pos]
+    l.pos = l.pos + 1
+    if c == 10 { l.line = l.line + 1 }
+    return c
+}
+
+## ── skip whitespace and ## comments ─────────────────────────────────────────
+fn skip_ws(l: refmut<Lexer>) -> unit {
+    loop {
+        if at_end(l) { break }
+        let c = peek_c(l)
+        if c == 32 or c == 9 or c == 13 or c == 10 {
+            advance_c(l)
+        } else if c == 35 and peek2_c(l) == 35 {
+            loop {
+                if at_end(l) { break }
+                let cc = advance_c(l)
+                if cc == 10 { break }
+            }
+        } else {
+            break
+        }
+    }
+    return unit
+}
+
+## ── keyword lookup ───────────────────────────────────────────────────────────
+fn make_kw_map() -> map<str, i64> {
+    let mut kw: map<str, i64> = map_new()
+    map_insert(kw, "fn",        101)
+    map_insert(kw, "let",       102)
+    map_insert(kw, "return",    103)
+    map_insert(kw, "if",        104)
+    map_insert(kw, "else",      105)
+    map_insert(kw, "match",     106)
+    map_insert(kw, "loop",      107)
+    map_insert(kw, "break",     108)
+    map_insert(kw, "for",       109)
+    map_insert(kw, "in",        110)
+    map_insert(kw, "struct",    111)
+    map_insert(kw, "enum",      112)
+    map_insert(kw, "pure",      113)
+    map_insert(kw, "effects",   114)
+    map_insert(kw, "requires",  115)
+    map_insert(kw, "ensures",   116)
+    map_insert(kw, "assert",    117)
+    map_insert(kw, "module",    118)
+    map_insert(kw, "use",       119)
+    map_insert(kw, "mut",       120)
+    map_insert(kw, "secret",    121)
+    map_insert(kw, "reveal",    122)
+    map_insert(kw, "move",      123)
+    map_insert(kw, "some",      124)
+    map_insert(kw, "none",      125)
+    map_insert(kw, "ok",        126)
+    map_insert(kw, "err",       127)
+    map_insert(kw, "true",      128)
+    map_insert(kw, "false",     129)
+    map_insert(kw, "and",       130)
+    map_insert(kw, "or",        131)
+    map_insert(kw, "not",       132)
+    map_insert(kw, "must",      133)
+    map_insert(kw, "extern",    134)
+    return kw
+}
+
+## ── scanners ──────────────────────────────────────────────────────────────────
+fn scan_ident(l: refmut<Lexer>, kw: map<str, i64>) -> Token {
+    let start = l.pos
+    let line  = l.line
+    loop {
+        if at_end(l) { break }
+        if not is_alnum(peek_c(l)) { break }
+        advance_c(l)
+    }
+    let lexeme = str_substr(l.src, start, l.pos - start)
+    let kind = map_get(kw, lexeme) must {
+        some(k) => k
+        none    => TK_IDENT()
+    }
+    return make_tok(kind, lexeme, line)
+}
+
+fn scan_int(l: refmut<Lexer>) -> Token {
+    let start = l.pos
+    let line  = l.line
+    loop {
+        if at_end(l) { break }
+        if not is_digit(peek_c(l)) { break }
+        advance_c(l)
+    }
+    return make_tok(TK_INT(), str_substr(l.src, start, l.pos - start), line)
+}
+
+fn scan_str_lit(l: refmut<Lexer>) -> Token {
+    let line = l.line
+    let start = l.pos
+    advance_c(l)
+    loop {
+        if at_end(l) { break }
+        let c = advance_c(l)
+        if c == 34 { break }
+        if c == 92 {
+            if not at_end(l) { advance_c(l) }
+        }
+    }
+    return make_tok(TK_STR(), str_substr(l.src, start, l.pos - start), line)
+}
+
+fn scan_sym(l: refmut<Lexer>) -> Token {
+    let line = l.line
+    let c = advance_c(l)
+    if c == 43 { return make_tok(TK_PLUS(),     "+",  line) }
+    if c == 42 { return make_tok(TK_STAR(),     "*",  line) }
+    if c == 37 { return make_tok(TK_PERCENT(),  "%",  line) }
+    if c == 123 { return make_tok(TK_LBRACE(),  "{",  line) }
+    if c == 125 { return make_tok(TK_RBRACE(),  "}",  line) }
+    if c == 40  { return make_tok(TK_LPAREN(),  "(",  line) }
+    if c == 41  { return make_tok(TK_RPAREN(),  ")",  line) }
+    if c == 91  { return make_tok(TK_LBRACKET(),"[",  line) }
+    if c == 93  { return make_tok(TK_RBRACKET(),"]",  line) }
+    if c == 44  { return make_tok(TK_COMMA(),   ",",  line) }
+    if c == 58  { return make_tok(TK_COLON(),   ":",  line) }
+    if c == 46  { return make_tok(TK_DOT(),     ".",  line) }
+    if c == 38  { return make_tok(TK_AMP(),     "&",  line) }
+    if c == 47  { return make_tok(TK_SLASH(),   "/",  line) }
+    if c == 45 {
+        if peek_c(l) == 62 {
+            advance_c(l)
+            return make_tok(TK_ARROW(), "->", line)
+        }
+        return make_tok(TK_MINUS(), "-", line)
+    }
+    if c == 61 {
+        if peek_c(l) == 61 {
+            advance_c(l)
+            return make_tok(TK_EQEQ(), "==", line)
+        }
+        return make_tok(TK_EQ(), "=", line)
+    }
+    if c == 33 {
+        if peek_c(l) == 61 {
+            advance_c(l)
+            return make_tok(TK_BANGEQ(), "!=", line)
+        }
+        return make_tok(TK_ERROR(), "!", line)
+    }
+    if c == 60 {
+        if peek_c(l) == 61 {
+            advance_c(l)
+            return make_tok(TK_LTEQ(), "<=", line)
+        }
+        return make_tok(TK_LT(), "<", line)
+    }
+    if c == 62 {
+        if peek_c(l) == 61 {
+            advance_c(l)
+            return make_tok(TK_GTEQ(), ">=", line)
+        }
+        return make_tok(TK_GT(), ">", line)
+    }
+    return make_tok(TK_ERROR(), str_from_u8(c), line)
+}
+
+fn next_tok(l: refmut<Lexer>, kw: map<str, i64>) -> Token {
+    let c = peek_c(l)
+    if is_alpha(c)  { return scan_ident(l, kw) }
+    if is_digit(c)  { return scan_int(l) }
+    if c == 34      { return scan_str_lit(l) }
+    return scan_sym(l)
+}
+
+## ── lex entry point ───────────────────────────────────────────────────────────
+fn lex_source(src: str) -> vec<Token> {
+    let mut l: Lexer = Lexer{ src: src, src_len: str_len(src), pos: 0, line: 1 }
+    let kw = make_kw_map()
+    let mut tokens: vec<Token> = vec_new()
+    loop {
+        skip_ws(refmut(l))
+        if at_end(refmut(l)) { break }
+        let tok = next_tok(refmut(l), kw)
+        vec_push(tokens, tok)
+    }
+    vec_push(tokens, make_tok(TK_EOF(), "", l.line))
+    return tokens
+}
+
+## ── parser structs ────────────────────────────────────────────────────────────
+## Note: vec<Token> cannot be a struct field (compiler limitation: vec typedefs
+## are emitted after struct definitions). We use pos/n_tokens as a separate
+## struct and pass tokens as a parameter everywhere.
+
+struct PState {
+    pos:      u64
+    n_tokens: u64
+    has_err:  bool
+    errmsg:   str
+}
+
+struct Stats {
+    fn_count:     i64
+    struct_count: i64
+}
+
+## ── parser utilities ─────────────────────────────────────────────────────────
+fn par_peek(p: ref<PState>, tokens: vec<Token>) -> Token {
+    if p.pos >= p.n_tokens {
+        return make_tok(TK_EOF(), "", 0)
+    }
+    return tokens[p.pos]
+}
+
+fn par_peek_kind(p: ref<PState>, tokens: vec<Token>) -> i64 {
+    if p.pos >= p.n_tokens {
+        return TK_EOF()
+    }
+    return tokens[p.pos].kind
+}
+
+fn par_advance(p: refmut<PState>, tokens: vec<Token>) -> Token {
+    if p.pos >= p.n_tokens {
+        return make_tok(TK_EOF(), "", 0)
+    }
+    let tok = tokens[p.pos]
+    p.pos = p.pos + 1
+    return tok
+}
+
+fn par_peek_next_kind(p: ref<PState>, tokens: vec<Token>) -> i64 {
+    let next_pos = p.pos + 1
+    if next_pos >= p.n_tokens {
+        return TK_EOF()
+    }
+    return tokens[next_pos].kind
+}
+
+fn par_check(p: ref<PState>, tokens: vec<Token>, kind: i64) -> bool {
+    return par_peek_kind(p, tokens) == kind
+}
+
+fn par_match(p: refmut<PState>, tokens: vec<Token>, kind: i64) -> bool {
+    if par_peek_kind(p, tokens) == kind {
+        par_advance(p, tokens)
+        return true
+    }
+    return false
+}
+
+fn par_expect(p: refmut<PState>, tokens: vec<Token>, kind: i64) -> str {
+    let tok = par_peek(p, tokens)
+    if tok.kind == kind {
+        par_advance(p, tokens)
+        return tok.lexeme
+    }
+    p.has_err = true
+    p.errmsg = str_concat("expected kind ", str_concat(int_to_str(kind), str_concat(" got ", tok.lexeme)))
+    return ""
+}
+
+## ── type parser ───────────────────────────────────────────────────────────────
+## Consumes tokens until a terminator (, ) { = at angle-bracket depth 0.
+fn parse_type_str(p: refmut<PState>, tokens: vec<Token>) -> str {
+    let mut result: str = ""
+    let mut angle_depth: i64 = 0
+    loop {
+        let k = par_peek_kind(p, tokens)
+        if angle_depth == 0 {
+            if k == TK_COMMA()   { break }
+            if k == TK_RPAREN()  { break }
+            if k == TK_LBRACE()  { break }
+            if k == TK_EQ()      { break }
+            if k == TK_EOF()     { break }
+            ## pure/effects/requires/ensures terminate the type
+            if k == 113 { break }
+            if k == 114 { break }
+            if k == 115 { break }
+            if k == 116 { break }
+        }
+        if k == TK_LT() { angle_depth = angle_depth + 1 }
+        if k == TK_GT() {
+            if angle_depth > 0 {
+                angle_depth = angle_depth - 1
+            } else {
+                break
+            }
+        }
+        let tok = par_advance(p, tokens)
+        ## Handle fn type: fn(params) -> ret
+        if tok.kind == 101 {
+            result = str_concat(result, "fn")
+            if par_peek_kind(p, tokens) == TK_LPAREN() {
+                par_advance(p, tokens)
+                result = str_concat(result, "(")
+                let mut first_param: bool = true
+                loop {
+                    if par_peek_kind(p, tokens) == TK_RPAREN() { break }
+                    if par_peek_kind(p, tokens) == TK_EOF()    { break }
+                    if not first_param {
+                        result = str_concat(result, ", ")
+                        par_advance(p, tokens)
+                    }
+                    let pt = parse_type_str(p, tokens)
+                    result = str_concat(result, pt)
+                    first_param = false
+                    if par_peek_kind(p, tokens) != TK_COMMA() {
+                        break
+                    }
+                }
+                par_match(p, tokens, TK_RPAREN())
+                result = str_concat(result, ")")
+                if par_peek_kind(p, tokens) == TK_ARROW() {
+                    par_advance(p, tokens)
+                    result = str_concat(result, " -> ")
+                    let rt = parse_type_str(p, tokens)
+                    result = str_concat(result, rt)
+                }
+            }
+        } else {
+            result = str_concat(result, tok.lexeme)
+        }
+    }
+    return result
+}
+
+## ── struct-field type parser ─────────────────────────────────────────────────
+## Like parse_type_str but also stops at IDENT/keyword followed by COLON
+## (the start of the next field) at angle_depth=0.
+fn parse_struct_field_type(p: refmut<PState>, tokens: vec<Token>) -> str {
+    let mut result: str = ""
+    let mut angle_depth: i64 = 0
+    loop {
+        let k = par_peek_kind(p, tokens)
+        if angle_depth == 0 {
+            if k == TK_COMMA()   { break }
+            if k == TK_RPAREN()  { break }
+            if k == TK_LBRACE()  { break }
+            if k == TK_RBRACE()  { break }
+            if k == TK_EQ()      { break }
+            if k == TK_EOF()     { break }
+            if k == 113 { break }
+            if k == 114 { break }
+            if k == 115 { break }
+            if k == 116 { break }
+            ## If IDENT or keyword followed by COLON, it's the next field name — stop
+            if k == TK_IDENT() or k >= 101 {
+                if par_peek_next_kind(p, tokens) == TK_COLON() {
+                    break
+                }
+            }
+        }
+        if k == TK_LT() { angle_depth = angle_depth + 1 }
+        if k == TK_GT() {
+            if angle_depth > 0 {
+                angle_depth = angle_depth - 1
+            } else {
+                break
+            }
+        }
+        let tok = par_advance(p, tokens)
+        result = str_concat(result, tok.lexeme)
+    }
+    return result
+}
+
+## ── body skipper with statement counter ──────────────────────────────────────
+fn skip_body_count_stmts(p: refmut<PState>, tokens: vec<Token>) -> i64 {
+    par_expect(p, tokens, TK_LBRACE())
+    let mut depth: i64 = 1
+    let mut count: i64 = 0
+    loop {
+        if depth == 0 { break }
+        let k = par_peek_kind(p, tokens)
+        if k == TK_EOF() { break }
+        if k == TK_LBRACE() {
+            depth = depth + 1
+            par_advance(p, tokens)
+        } else if k == TK_RBRACE() {
+            depth = depth - 1
+            par_advance(p, tokens)
+        } else {
+            if depth == 1 {
+                if k == 102 { count = count + 1 }  ## let
+                if k == 103 { count = count + 1 }  ## return
+                if k == 104 { count = count + 1 }  ## if
+                if k == 107 { count = count + 1 }  ## loop
+                if k == 108 { count = count + 1 }  ## break
+                if k == 109 { count = count + 1 }  ## for
+            }
+            par_advance(p, tokens)
+        }
+    }
+    return count
+}
+
+## ── param list parser ─────────────────────────────────────────────────────────
+fn parse_params(p: refmut<PState>, tokens: vec<Token>) -> str {
+    par_expect(p, tokens, TK_LPAREN())
+    let mut result: str = ""
+    let mut first: bool = true
+    loop {
+        if par_peek_kind(p, tokens) == TK_RPAREN() { break }
+        if par_peek_kind(p, tokens) == TK_EOF()    { break }
+        if not first {
+            result = str_concat(result, ", ")
+            par_match(p, tokens, TK_COMMA())
+        }
+        let pname = par_peek(p, tokens)
+        if pname.kind == TK_IDENT() or pname.kind >= 101 {
+            par_advance(p, tokens)
+            if par_peek_kind(p, tokens) == TK_COLON() {
+                par_advance(p, tokens)
+                let ptype = parse_type_str(p, tokens)
+                result = str_concat(result, str_concat(pname.lexeme, str_concat(": ", ptype)))
+            } else {
+                result = str_concat(result, pname.lexeme)
+            }
+        } else {
+            break
+        }
+        first = false
+    }
+    par_expect(p, tokens, TK_RPAREN())
+    return result
+}
+
+## ── fn declaration parser ─────────────────────────────────────────────────────
+fn parse_fn_decl(p: refmut<PState>, tokens: vec<Token>, stats: refmut<Stats>) -> unit {
+    ## consume 'fn' keyword
+    par_advance(p, tokens)
+    let name = par_advance(p, tokens)
+    let params = parse_params(p, tokens)
+    ## -> return type
+    let mut ret_type: str = "unit"
+    if par_peek_kind(p, tokens) == TK_ARROW() {
+        par_advance(p, tokens)
+        ret_type = parse_type_str(p, tokens)
+    }
+    ## optional effect annotations
+    let mut effect_str: str = ""
+    loop {
+        let ek = par_peek_kind(p, tokens)
+        if ek == 113 {
+            ## pure
+            effect_str = " pure"
+            par_advance(p, tokens)
+            break
+        } else if ek == 114 or ek == 115 or ek == 116 {
+            ## effects/requires/ensures - skip with parens
+            par_advance(p, tokens)
+            if par_peek_kind(p, tokens) == TK_LPAREN() {
+                par_advance(p, tokens)
+                let mut depth2: i64 = 1
+                loop {
+                    if depth2 == 0 { break }
+                    let k2 = par_peek_kind(p, tokens)
+                    if k2 == TK_EOF() { break }
+                    if k2 == TK_LPAREN() { depth2 = depth2 + 1 }
+                    if k2 == TK_RPAREN() { depth2 = depth2 - 1 }
+                    par_advance(p, tokens)
+                }
+            }
+        } else {
+            break
+        }
+    }
+    ## count stmts in body
+    let mut stmt_count: i64 = 0
+    if par_peek_kind(p, tokens) == TK_LBRACE() {
+        stmt_count = skip_body_count_stmts(p, tokens)
+    }
+    ## print result
+    let sig = str_concat("fn ", str_concat(name.lexeme, str_concat("(", str_concat(params, str_concat(") -> ", str_concat(ret_type, str_concat(effect_str, str_concat("  [", str_concat(int_to_str(stmt_count), " stmts]")))))))))
+    print(sig)
+    stats.fn_count = stats.fn_count + 1
+    return unit
+}
+
+## ── struct declaration parser ─────────────────────────────────────────────────
+fn parse_struct_decl(p: refmut<PState>, tokens: vec<Token>, stats: refmut<Stats>) -> unit {
+    ## consume 'struct'
+    par_advance(p, tokens)
+    let name = par_advance(p, tokens)
+    par_expect(p, tokens, TK_LBRACE())
+    let mut fields: str = ""
+    let mut first: bool = true
+    loop {
+        if par_peek_kind(p, tokens) == TK_RBRACE() { break }
+        if par_peek_kind(p, tokens) == TK_EOF()    { break }
+        ## skip commas
+        if par_peek_kind(p, tokens) == TK_COMMA() {
+            par_advance(p, tokens)
+        }
+        if par_peek_kind(p, tokens) == TK_RBRACE() { break }
+        let fname = par_peek(p, tokens)
+        if fname.kind == TK_IDENT() or fname.kind >= 101 {
+            par_advance(p, tokens)
+            if par_peek_kind(p, tokens) == TK_COLON() {
+                par_advance(p, tokens)
+                let ftype = parse_struct_field_type(p, tokens)
+                if not first {
+                    fields = str_concat(fields, ", ")
+                }
+                fields = str_concat(fields, str_concat(fname.lexeme, str_concat(": ", ftype)))
+                first = false
+            }
+        } else {
+            break
+        }
+    }
+    par_expect(p, tokens, TK_RBRACE())
+    print(str_concat("struct ", str_concat(name.lexeme, str_concat(" { ", str_concat(fields, " }")))))
+    stats.struct_count = stats.struct_count + 1
+    return unit
+}
+
+## ── enum / generic body skipper ──────────────────────────────────────────────
+fn skip_to_matching_brace(p: refmut<PState>, tokens: vec<Token>) -> unit {
+    par_expect(p, tokens, TK_LBRACE())
+    let mut depth: i64 = 1
+    loop {
+        if depth == 0 { break }
+        let k = par_peek_kind(p, tokens)
+        if k == TK_EOF() { break }
+        if k == TK_LBRACE() { depth = depth + 1 }
+        if k == TK_RBRACE() { depth = depth - 1 }
+        par_advance(p, tokens)
+    }
+    return unit
+}
+
+## ── top-level parser ─────────────────────────────────────────────────────────
+fn parse_top_level(p: refmut<PState>, tokens: vec<Token>, stats: refmut<Stats>) -> unit {
+    loop {
+        let k = par_peek_kind(p, tokens)
+        if k == TK_EOF() { break }
+        if k == 101 {
+            ## fn
+            parse_fn_decl(p, tokens, stats)
+        } else if k == 111 {
+            ## struct
+            parse_struct_decl(p, tokens, stats)
+        } else if k == 112 {
+            ## enum - skip name and body
+            par_advance(p, tokens)
+            par_advance(p, tokens)
+            if par_peek_kind(p, tokens) == TK_LBRACE() {
+                skip_to_matching_brace(p, tokens)
+            }
+        } else if k == 118 or k == 119 {
+            ## module / use - skip to next top-level item
+            par_advance(p, tokens)
+            loop {
+                let k2 = par_peek_kind(p, tokens)
+                if k2 == TK_EOF()  { break }
+                if k2 == 101       { break }
+                if k2 == 111       { break }
+                if k2 == 112       { break }
+                par_advance(p, tokens)
+            }
+        } else if k == 134 {
+            ## extern - consume, then parse fn if next
+            par_advance(p, tokens)
+            if par_peek_kind(p, tokens) == 101 {
+                parse_fn_decl(p, tokens, stats)
+            }
+        } else {
+            par_advance(p, tokens)
+        }
+    }
+    return unit
+}
+
+## ── main ──────────────────────────────────────────────────────────────────────
+fn main() -> unit {
+    let mut src: str = ""
+    loop {
+        let line = try_read_line() must {
+            some(s) => s
+            none    => break
+        }
+        src = str_concat(src, str_concat(line, str_from_u8(10)))
+    }
+
+    let tokens = lex_source(src)
+    let n = vec_len(tokens)
+    let mut p: PState = PState{
+        pos:      0,
+        n_tokens: n,
+        has_err:  false,
+        errmsg:   ""
+    }
+    let mut stats: Stats = Stats{ fn_count: 0, struct_count: 0 }
+    parse_top_level(refmut(p), tokens, refmut(stats))
+    print("---")
+    print(str_concat(int_to_str(stats.fn_count), str_concat(" fn, ", str_concat(int_to_str(stats.struct_count), " struct"))))
+    return unit
+}
