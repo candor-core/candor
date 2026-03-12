@@ -1,0 +1,311 @@
+## ast.cnd - Candor Abstract Syntax Tree definitions
+##
+## This file defines the explicit, statically-typed nodes for Candor's AST.
+## In alignment with Candor's philosophy of explicit ownership and no hidden
+## allocations, recursive nodes own their children via explicit heap 
+## allocations using `vec<T>` (typically of length 1).
+## Pointers (`ref<T>`) are strictly for borrowing and cannot own AST branches.
+
+struct Token {
+    kind:   i64
+    lexeme: str
+    line:   i64
+}
+
+## ── Expressions ──────────────────────────────────────────────────────────────
+
+enum Expr {
+    IntLit(IntLitExpr),
+    FloatLit(FloatLitExpr),
+    StringLit(StringLitExpr),
+    BoolLit(BoolLitExpr),
+    Ident(IdentExpr),
+    Binary(BinaryExpr),
+    Unary(UnaryExpr),
+    Call(CallExpr),
+    Field(FieldExpr),
+    Index(IndexExpr),
+    Must(MustExpr),
+    Match(MatchExpr),
+    Ret(ReturnExpr),
+    Brk(BreakExpr),
+    Path(PathExpr),
+    StructLit(StructLitExpr)
+}
+
+struct IntLitExpr { tok: Token }
+struct FloatLitExpr { tok: Token }
+struct StringLitExpr { tok: Token }
+struct BoolLitExpr { tok: Token }
+struct IdentExpr { tok: Token }
+
+struct BinaryExpr {
+    left: vec<Expr>,
+    op: Token,
+    right: vec<Expr>
+}
+
+struct UnaryExpr {
+    op: Token,
+    operand: vec<Expr>
+}
+
+struct CallExpr {
+    fn_expr: vec<Expr>,
+    lparen: Token,
+    args: vec<Expr>
+}
+
+struct FieldExpr {
+    receiver: vec<Expr>,
+    dot: Token,
+    field: Token
+}
+
+struct IndexExpr {
+    collection: vec<Expr>,
+    lbracket: Token,
+    index: vec<Expr>
+}
+
+struct MustArm {
+    pattern: vec<Expr>,
+    arrow: Token,
+    body: vec<Expr>
+}
+
+struct MustExpr {
+    x: vec<Expr>,
+    must_tok: Token,
+    arms: vec<MustArm>
+}
+
+struct MatchExpr {
+    match_tok: Token,
+    x: vec<Expr>,
+    arms: vec<MustArm>
+}
+
+struct ReturnExpr {
+    return_tok: Token,
+    value: vec<Expr>  ## length 0 or 1
+}
+
+struct BreakExpr {
+    break_tok: Token
+}
+
+struct PathExpr {
+    head: Token,
+    sep: Token,
+    tail: Token
+}
+
+struct FieldInit {
+    name: Token,
+    colon: Token,
+    value: vec<Expr>
+}
+
+struct StructLitExpr {
+    type_name: Token,
+    fields: vec<FieldInit>
+}
+
+## ── Statements ───────────────────────────────────────────────────────────────
+
+enum Stmt {
+    Block(BlockStmt),
+    Let(LetStmt),
+    Ret(ReturnStmt),
+    Expr(ExprStmt),
+    If(IfStmt),
+    Loop(LoopStmt),
+    Brk(BreakStmt),
+    For(ForStmt),
+    Assign(AssignStmt),
+    FieldAssign(FieldAssignStmt),
+    IndexAssign(IndexAssignStmt),
+    Assert(AssertStmt)
+}
+
+struct BlockStmt {
+    lbrace: Token,
+    stmts: vec<Stmt>
+}
+
+struct LetStmt {
+    let_tok: Token,
+    mut_flag: bool,
+    name: Token,
+    type_ann: vec<TypeExpr>,  ## length 0 or 1
+    value: vec<Expr>
+}
+
+struct ReturnStmt {
+    return_tok: Token,
+    value: vec<Expr>  ## length 0 or 1
+}
+
+struct ExprStmt {
+    x: vec<Expr>
+}
+
+struct IfStmt {
+    if_tok: Token,
+    cond: vec<Expr>,
+    then_block: vec<BlockStmt>,
+    else_stmt: vec<Stmt>  ## length 0 or 1
+}
+
+struct LoopStmt {
+    loop_tok: Token,
+    body: vec<BlockStmt>
+}
+
+struct BreakStmt {
+    break_tok: Token
+}
+
+struct ForStmt {
+    for_tok: Token,
+    var_name: Token,
+    var2_name: vec<Token>,  ## length 0 or 1
+    in_tok: Token,
+    collection: vec<Expr>,
+    body: vec<BlockStmt>
+}
+
+struct AssignStmt {
+    name: Token,
+    eq: Token,
+    value: vec<Expr>
+}
+
+struct FieldAssignStmt {
+    target: vec<FieldExpr>,
+    eq: Token,
+    value: vec<Expr>
+}
+
+struct IndexAssignStmt {
+    target: vec<IndexExpr>,
+    eq: Token,
+    value: vec<Expr>
+}
+
+struct AssertStmt {
+    assert_tok: Token,
+    expr: vec<Expr>
+}
+
+## ── Types ────────────────────────────────────────────────────────────────────
+
+enum TypeExpr {
+    Named(NamedType),
+    GenT(GenericType),
+    FnT(FnType)
+}
+
+struct NamedType {
+    name: Token
+}
+
+struct GenericType {
+    name: Token,
+    params: vec<TypeExpr>
+}
+
+struct FnType {
+    fn_tok: Token,
+    params: vec<TypeExpr>,
+    ret_type: vec<TypeExpr>
+}
+
+## ── Declarations ─────────────────────────────────────────────────────────────
+
+enum Decl {
+    Module(ModuleDecl),
+    Use(UseDecl),
+    Fn(FnDecl),
+    Struct(StructDecl),
+    Enum(EnumDecl),
+    ExternFn(ExternFnDecl)
+}
+
+struct ModuleDecl {
+    module_tok: Token,
+    name: Token
+}
+
+struct UseDecl {
+    use_tok: Token,
+    path: vec<Token>
+}
+
+struct Param {
+    name: Token,
+    type_expr: vec<TypeExpr>
+}
+
+struct ContractClause {
+    kind: i64,  ## 0 = requires, 1 = ensures
+    tok: Token,
+    expr: vec<Expr>
+}
+
+struct EffectsAnnotation {
+    kind: i64,  ## 0 = none, 1 = pure, 2 = decl, 3 = cap
+    names: vec<str>
+}
+
+struct FnDecl {
+    fn_tok: Token,
+    name: Token,
+    params: vec<Param>,
+    ret_type: vec<TypeExpr>,
+    effects_ann: vec<EffectsAnnotation>,  ## length 0 or 1
+    contracts: vec<ContractClause>,
+    body: vec<BlockStmt>
+}
+
+struct Field {
+    name: Token,
+    type_expr: vec<TypeExpr>
+}
+
+struct StructDecl {
+    struct_tok: Token,
+    name: Token,
+    fields: vec<Field>
+}
+
+struct EnumVariant {
+    name: Token,
+    fields: vec<TypeExpr>
+}
+
+struct EnumDecl {
+    enum_tok: Token,
+    name: Token,
+    variants: vec<EnumVariant>
+}
+
+struct ExternFnDecl {
+    extern_tok: Token,
+    name: Token,
+    params: vec<Param>,
+    ret_type: vec<TypeExpr>,
+    effects_ann: vec<EffectsAnnotation>  ## length 0 or 1
+}
+
+## ── File ─────────────────────────────────────────────────────────────────────
+
+struct FileNode {
+    name: str,
+    decls: vec<Decl>
+}
+
+fn main() -> unit {
+    return unit
+}

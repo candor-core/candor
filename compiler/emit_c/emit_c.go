@@ -72,9 +72,12 @@ func (e *emitter) emitFile(file *parser.File) error {
 	e.emitRuntimeHelpers()
 	e.writeln("")
 
-	// Forward-declare all structs first so they can reference each other via pointers.
+	// Forward-declare all structs and enums first so they can reference each other via pointers.
 	for _, decl := range file.Decls {
-		if d, ok := decl.(*parser.StructDecl); ok {
+		switch d := decl.(type) {
+		case *parser.StructDecl:
+			e.writef("typedef struct %s %s;\n", d.Name.Lexeme, d.Name.Lexeme)
+		case *parser.EnumDecl:
 			e.writef("typedef struct %s %s;\n", d.Name.Lexeme, d.Name.Lexeme)
 		}
 	}
@@ -221,6 +224,54 @@ func (e *emitter) mapContainsFnName(kC, vC string) string {
 	return "_cnd_map_contains_" + e.mapMangle(kC) + "_" + e.mapMangle(vC)
 }
 
+// ── type collection ───────────────────────────────────────────────────────────
+
+func (e *emitter) allUsedTypes() []typeck.Type {
+	var types []typeck.Type
+	seen := map[typeck.Type]bool{}
+	var add func(t typeck.Type)
+	add = func(t typeck.Type) {
+		if t == nil || seen[t] {
+			return
+		}
+		seen[t] = true
+		types = append(types, t)
+		switch pt := t.(type) {
+		case *typeck.GenType:
+			for _, p := range pt.Params {
+				add(p)
+			}
+		case *typeck.FnType:
+			for _, p := range pt.Params {
+				add(p)
+			}
+			add(pt.Ret)
+		}
+	}
+	for _, t := range e.res.ExprTypes {
+		add(t)
+	}
+	for _, sig := range e.res.FnSigs {
+		for _, p := range sig.Params {
+			add(p)
+		}
+		add(sig.Ret)
+	}
+	for _, s := range e.res.Structs {
+		for _, ft := range s.Fields {
+			add(ft)
+		}
+	}
+	for _, en := range e.res.Enums {
+		for _, v := range en.Variants {
+			for _, ft := range v.Fields {
+				add(ft)
+			}
+		}
+	}
+	return types
+}
+
 // ── fn(...)->... typedef helpers ──────────────────────────────────────────────
 
 func (e *emitter) fnTypeMangle(s string) string {
@@ -270,14 +321,8 @@ func (e *emitter) emitFnTypeTypedefs() error {
 		}
 		collect(ft.Ret)
 	}
-	for _, t := range e.res.ExprTypes {
+	for _, t := range e.allUsedTypes() {
 		collect(t)
-	}
-	for _, sig := range e.res.FnSigs {
-		for _, p := range sig.Params {
-			collect(p)
-		}
-		collect(sig.Ret)
 	}
 	if len(byName) == 0 {
 		return nil
@@ -342,7 +387,7 @@ func (e *emitter) emitFnTypeTypedefs() error {
 
 func (e *emitter) emitVecStructTypedefs() error {
 	seen := map[string]bool{}
-	for _, t := range e.res.ExprTypes {
+	for _, t := range e.allUsedTypes() {
 		gen, ok := t.(*typeck.GenType)
 		if !ok || gen.Con != "vec" || len(gen.Params) != 1 {
 			continue
@@ -366,7 +411,7 @@ func (e *emitter) emitVecStructTypedefs() error {
 
 func (e *emitter) emitVecStructHelpers() error {
 	seen := map[string]bool{}
-	for _, t := range e.res.ExprTypes {
+	for _, t := range e.allUsedTypes() {
 		gen, ok := t.(*typeck.GenType)
 		if !ok || gen.Con != "vec" || len(gen.Params) != 1 {
 			continue
@@ -398,7 +443,7 @@ func (e *emitter) emitVecStructHelpers() error {
 
 func (e *emitter) emitMapStructTypedefs() error {
 	seenMaps := map[string]bool{}
-	for _, t := range e.res.ExprTypes {
+	for _, t := range e.allUsedTypes() {
 		gen, ok := t.(*typeck.GenType)
 		if !ok || gen.Con != "map" || len(gen.Params) != 2 {
 			continue
@@ -436,7 +481,7 @@ func (e *emitter) emitMapStructTypedefs() error {
 func (e *emitter) emitMapStructHelpers() error {
 	seenMaps := map[string]bool{}
 	seenKeys := map[string]bool{}
-	for _, t := range e.res.ExprTypes {
+	for _, t := range e.allUsedTypes() {
 		gen, ok := t.(*typeck.GenType)
 		if !ok || gen.Con != "map" || len(gen.Params) != 2 {
 			continue
