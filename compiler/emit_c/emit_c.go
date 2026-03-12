@@ -46,6 +46,9 @@ type emitter struct {
 	contracts []parser.ContractClause
 	retType   typeck.Type
 	inEnsures bool // true when emitting ensures expressions (result -> _cnd_result)
+
+	emittedTypes  map[string]bool // tracks emitted structs/enums
+	emittingTypes map[string]bool // detects cycles
 }
 
 func (e *emitter) freshTmp() string {
@@ -69,49 +72,64 @@ func (e *emitter) emitFile(file *parser.File) error {
 	e.emitRuntimeHelpers()
 	e.writeln("")
 
+	// Forward-declare all structs first so they can reference each other via pointers.
+	for _, decl := range file.Decls {
+		if d, ok := decl.(*parser.StructDecl); ok {
+			e.writef("typedef struct %s %s;\n", d.Name.Lexeme, d.Name.Lexeme)
+		}
+	}
+
 	// Emit result<T,E> struct typedefs used in this file.
-	if err := e.emitResultStructs(); err != nil {
+	if err := e.emitResultStructTypedefs(); err != nil {
 		return err
 	}
 
-	// Forward-declare all structs first so they can reference each other.
-	for _, decl := range file.Decls {
-		if d, ok := decl.(*parser.StructDecl); ok {
-			e.writef("struct %s;\n", d.Name.Lexeme)
-		}
+	// Emit vec<T> struct typedefs after user structs are forward declared.
+	if err := e.emitVecStructTypedefs(); err != nil {
+		return err
 	}
 
-	// Emit struct definitions.
+	// Emit map<K,V> struct typedefs after user structs are forward declared.
+	if err := e.emitMapStructTypedefs(); err != nil {
+		return err
+	}
+
+	// Emit enum definitions (tagged unions) and struct definitions.
+	// Since structs can contain structs (and result/map entries) by value,
+	// we must emit them in topological order.
+	e.emittedTypes = make(map[string]bool)
+	e.emittingTypes = make(map[string]bool)
 	for _, decl := range file.Decls {
-		if d, ok := decl.(*parser.StructDecl); ok {
-			if err := e.emitStructDecl(d); err != nil {
+		switch d := decl.(type) {
+		case *parser.StructDecl:
+			if err := e.ensureStructEmitted(e.res.Structs[d.Name.Lexeme]); err != nil {
 				return err
+			}
+		case *parser.EnumDecl:
+			if err := e.ensureEnumEmitted(e.res.Enums[d.Name.Lexeme]); err != nil {
+				return err
+			}
+		case *parser.FnDecl:
+			// Ensure all types used in the function body are emitted
+			// (e.g. nested result types, local struct literals).
+			for _, typ := range e.res.ExprTypes {
+				if err := e.ensureTypeDependenciesEmitted(typ); err != nil {
+					return err
+				}
 			}
 		}
 	}
 
-	// Emit enum definitions (tagged unions).
-	for _, decl := range file.Decls {
-		if d, ok := decl.(*parser.EnumDecl); ok {
-			if err := e.emitEnumDecl(d); err != nil {
-				return err
-			}
-		}
+	// Emit vec<T> push helpers and map<K,V> operation helpers now that all
+	// user structs and enums are fully defined.
+	if err := e.emitVecStructHelpers(); err != nil {
+		return err
 	}
-
-	// Emit vec<T> struct typedefs and push helpers after user structs/enums are
-	// defined, so that vec<UserStruct> elements are already known to the C compiler.
-	if err := e.emitVecStructs(); err != nil {
+	if err := e.emitMapStructHelpers(); err != nil {
 		return err
 	}
 
-	// Emit map<K,V> struct typedefs and operation helpers after user structs/enums.
-	if err := e.emitMapStructs(); err != nil {
-		return err
-	}
-
-	// Emit fn(...)->... function pointer typedefs after structs are defined,
-	// since fn types may reference struct types in their parameter/return types.
+	// Emit fn(...)->... function pointer typedefs.
 	if err := e.emitFnTypeTypedefs(); err != nil {
 		return err
 	}
@@ -322,7 +340,31 @@ func (e *emitter) emitFnTypeTypedefs() error {
 	return nil
 }
 
-func (e *emitter) emitVecStructs() error {
+func (e *emitter) emitVecStructTypedefs() error {
+	seen := map[string]bool{}
+	for _, t := range e.res.ExprTypes {
+		gen, ok := t.(*typeck.GenType)
+		if !ok || gen.Con != "vec" || len(gen.Params) != 1 {
+			continue
+		}
+		elemC, err := e.cType(gen.Params[0])
+		if err != nil {
+			continue
+		}
+		name := e.vecTypeName(elemC)
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		e.writef("typedef struct { %s* _data; uint64_t _len; uint64_t _cap; } %s;\n", elemC, name)
+	}
+	if len(seen) > 0 {
+		e.writeln("")
+	}
+	return nil
+}
+
+func (e *emitter) emitVecStructHelpers() error {
 	seen := map[string]bool{}
 	for _, t := range e.res.ExprTypes {
 		gen, ok := t.(*typeck.GenType)
@@ -339,7 +381,6 @@ func (e *emitter) emitVecStructs() error {
 		}
 		seen[name] = true
 		pushFn := e.vecPushName(elemC)
-		e.writef("typedef struct { %s* _data; uint64_t _len; uint64_t _cap; } %s;\n", elemC, name)
 		e.writef("static inline void %s(%s* v, %s val) {\n", pushFn, name, elemC)
 		e.writef("    if (v->_len >= v->_cap) {\n")
 		e.writef("        uint64_t _nc = v->_cap ? v->_cap * 2 : 4;\n")
@@ -355,7 +396,44 @@ func (e *emitter) emitVecStructs() error {
 	return nil
 }
 
-func (e *emitter) emitMapStructs() error {
+func (e *emitter) emitMapStructTypedefs() error {
+	seenMaps := map[string]bool{}
+	for _, t := range e.res.ExprTypes {
+		gen, ok := t.(*typeck.GenType)
+		if !ok || gen.Con != "map" || len(gen.Params) != 2 {
+			continue
+		}
+		kC, err := e.cType(gen.Params[0])
+		if err != nil {
+			continue
+		}
+		vC, err := e.cType(gen.Params[1])
+		if err != nil {
+			continue
+		}
+		mapName := e.mapTypeName(kC, vC)
+		if seenMaps[mapName] {
+			continue
+		}
+		seenMaps[mapName] = true
+
+		entryName := e.mapEntryName(kC, vC)
+
+		// Entry struct (forward declare first so struct pointer works)
+		e.writef("typedef struct %s %s;\n", entryName, entryName)
+		e.writef("struct %s { %s _key; %s _val; struct %s* _next; };\n",
+			entryName, kC, vC, entryName)
+		// Map struct
+		e.writef("typedef struct { %s** _buckets; uint64_t _len; uint64_t _cap; } %s;\n",
+			entryName, mapName)
+	}
+	if len(seenMaps) > 0 {
+		e.writeln("")
+	}
+	return nil
+}
+
+func (e *emitter) emitMapStructHelpers() error {
 	seenMaps := map[string]bool{}
 	seenKeys := map[string]bool{}
 	for _, t := range e.res.ExprTypes {
@@ -402,13 +480,6 @@ func (e *emitter) emitMapStructs() error {
 				e.writef("static inline int %s(%s a, %s b) { return a == b; }\n", eqFn, kC, kC)
 			}
 		}
-
-		// Entry struct (forward declare first so struct pointer works)
-		e.writef("typedef struct %s { %s _key; %s _val; struct %s* _next; } %s;\n",
-			entryName, kC, vC, entryName, entryName)
-		// Map struct
-		e.writef("typedef struct { %s** _buckets; uint64_t _len; uint64_t _cap; } %s;\n",
-			entryName, mapName)
 
 		// map_new
 		e.writef("static inline %s %s(void) {\n", mapName, newFn)
@@ -474,7 +545,7 @@ func (e *emitter) emitMapStructs() error {
 	return nil
 }
 
-func (e *emitter) emitResultStructs() error {
+func (e *emitter) emitResultStructTypedefs() error {
 	seen := map[string]bool{}
 	for _, t := range e.res.ExprTypes {
 		gen, ok := t.(*typeck.GenType)
@@ -489,20 +560,7 @@ func (e *emitter) emitResultStructs() error {
 			continue
 		}
 		seen[name] = true
-		okC, err := e.cType(gen.Params[0])
-		if err != nil {
-			return err
-		}
-		errC, err := e.cType(gen.Params[1])
-		if err != nil {
-			return err
-		}
-		if okC == "void" {
-			// result<unit, E> — no ok_val field needed
-			e.writef("typedef struct { int _ok; %s _err_val; } %s;\n", errC, name)
-		} else {
-			e.writef("typedef struct { int _ok; %s _ok_val; %s _err_val; } %s;\n", okC, errC, name)
-		}
+		e.writef("typedef struct %s %s;\n", name, name)
 	}
 	if len(seen) > 0 {
 		e.writeln("")
@@ -546,34 +604,127 @@ func hasFnDecls(file *parser.File) bool {
 	return false
 }
 
+// ── ensure topologies ────────────────────────────────────────────────────────
+
+// ensureTypeDependenciesEmitted walks a Type and calls ensure*Emitted for contained
+// structs, enums, and result types, so their C definition is written before usage.
+func (e *emitter) ensureTypeDependenciesEmitted(t typeck.Type) error {
+	switch t := t.(type) {
+	case *typeck.StructType:
+		return e.ensureStructEmitted(t)
+	case *typeck.EnumType:
+		return e.ensureEnumEmitted(t)
+	case *typeck.GenType:
+		for _, p := range t.Params {
+			if err := e.ensureTypeDependenciesEmitted(p); err != nil {
+				return err
+			}
+		}
+		if t.Con == "result" && len(t.Params) == 2 {
+			name, err := e.resultTypeName(t)
+			if err != nil {
+				return nil
+			}
+			if e.emittedTypes[name] || e.emittingTypes[name] {
+				return nil
+			}
+			e.emittingTypes[name] = true
+			okC, err := e.cType(t.Params[0])
+			if err != nil {
+				return err
+			}
+			errC, err := e.cType(t.Params[1])
+			if err != nil {
+				return err
+			}
+			e.writef("struct %s {\n", name)
+			if okC == "void" {
+				e.writef("    int _ok; %s _err_val;\n", errC)
+			} else {
+				e.writef("    int _ok; %s _ok_val; %s _err_val;\n", okC, errC)
+			}
+			e.writef("};\n")
+			e.emittedTypes[name] = true
+			e.emittingTypes[name] = false
+		}
+	case *typeck.FnType:
+		for _, p := range t.Params {
+			if err := e.ensureTypeDependenciesEmitted(p); err != nil {
+				return err
+			}
+		}
+		if err := e.ensureTypeDependenciesEmitted(t.Ret); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // ── struct ────────────────────────────────────────────────────────────────────
 
-func (e *emitter) emitStructDecl(d *parser.StructDecl) error {
-	st := e.res.Structs[d.Name.Lexeme]
-	e.writef("\ntypedef struct %s {\n", d.Name.Lexeme)
-	for _, f := range d.Fields {
-		cType, err := e.cType(st.Fields[f.Name.Lexeme])
+func (e *emitter) ensureStructEmitted(st *typeck.StructType) error {
+	if e.emittedTypes[st.Name] {
+		return nil
+	}
+	if e.emittingTypes[st.Name] {
+		return fmt.Errorf("cyclic struct dependency involving %s without using ref<T>", st.Name)
+	}
+	e.emittingTypes[st.Name] = true
+
+	// Ensure all fields are emitted first.
+	for _, fType := range st.Fields {
+		// Pointers (ref<T>, vec<T>, map<K,V>, option<T>) don't require the inner type
+		// to be fully defined for the struct body. Only inline types do.
+		if gen, ok := fType.(*typeck.GenType); ok {
+			if gen.Con == "ref" || gen.Con == "refmut" || gen.Con == "vec" || gen.Con == "map" || gen.Con == "option" {
+				// We don't strictly need it defined here, but we still ensure it.
+			} else if err := e.ensureTypeDependenciesEmitted(gen); err != nil {
+				return err
+			}
+		} else if err := e.ensureTypeDependenciesEmitted(fType); err != nil {
+			return err
+		}
+	}
+
+	e.writef("\nstruct %s {\n", st.Name)
+	// Output fields.
+	// NOTE: In Candor, map iteration over struct fields gives pseudo-random order,
+	// but e.res.Structs uses map so order is non-deterministic... but emit_c
+	// shouldn't break C if the fields are ordered randomly.
+	for fname, ftype := range st.Fields {
+		cType, err := e.cType(ftype)
 		if err != nil {
 			return err
 		}
-		e.writef("    %s %s;\n", cType, f.Name.Lexeme)
+		e.writef("    %s %s;\n", cType, fname)
 	}
-	e.writef("} %s;\n", d.Name.Lexeme)
+	e.writef("};\n")
+
+	e.emittedTypes[st.Name] = true
+	e.emittingTypes[st.Name] = false
 	return nil
 }
 
 // ── enum ──────────────────────────────────────────────────────────────────────
 
-// emitEnumDecl emits a tagged-union struct for a user-defined enum.
-// For each enum Foo with variants A, B(T), C(T1,T2) it emits:
-//
-//	typedef struct { int _tag; union { ... } _data; } Foo;
-//	static const int Foo_tag_A = 0; ...
-//	static inline Foo Foo_A(void) { ... }
-//	static inline Foo Foo_B(T _0) { ... }
-func (e *emitter) emitEnumDecl(d *parser.EnumDecl) error {
-	et := e.res.Enums[d.Name.Lexeme]
-	name := d.Name.Lexeme
+func (e *emitter) ensureEnumEmitted(et *typeck.EnumType) error {
+	if e.emittedTypes[et.Name] {
+		return nil
+	}
+	if e.emittingTypes[et.Name] {
+		return fmt.Errorf("cyclic enum dependency involving %s without using ref<T>", et.Name)
+	}
+	e.emittingTypes[et.Name] = true
+
+	for _, v := range et.Variants {
+		for _, fType := range v.Fields {
+			if err := e.ensureTypeDependenciesEmitted(fType); err != nil {
+				return err
+			}
+		}
+	}
+
+	name := et.Name
 
 	// Determine if any variant carries data.
 	hasData := false
@@ -584,7 +735,8 @@ func (e *emitter) emitEnumDecl(d *parser.EnumDecl) error {
 		}
 	}
 
-	e.writef("\ntypedef struct %s {\n    int _tag;\n", name)
+	e.writef("\ntypedef struct %s %s;\n", name, name)
+	e.writef("struct %s {\n    int _tag;\n", name)
 	if hasData {
 		e.writeln("    union {")
 		for _, v := range et.Variants {
@@ -603,7 +755,7 @@ func (e *emitter) emitEnumDecl(d *parser.EnumDecl) error {
 		}
 		e.writeln("    } _data;")
 	}
-	e.writef("} %s;\n", name)
+	e.writef("};\n")
 
 	// Tag constants.
 	for _, v := range et.Variants {
@@ -634,6 +786,9 @@ func (e *emitter) emitEnumDecl(d *parser.EnumDecl) error {
 			e.writeln("}")
 		}
 	}
+
+	e.emittedTypes[et.Name] = true
+	e.emittingTypes[et.Name] = false
 	return nil
 }
 

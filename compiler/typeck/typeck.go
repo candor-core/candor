@@ -133,7 +133,25 @@ func (c *checker) checkProgram(files []*parser.File) error {
 		}
 	}
 
-	// Pass 1: collect all fn/struct signatures and record which module each belongs to.
+	// Pass 1a: Pre-register struct and enum types with their names so they can be
+	// referenced mutually in their own fields.
+	for _, f := range files {
+		mod := fileModule[f]
+		for _, d := range f.Decls {
+			switch decl := d.(type) {
+			case *parser.StructDecl:
+				st := &StructType{Name: decl.Name.Lexeme, Fields: make(map[string]Type)}
+				c.structs[decl.Name.Lexeme] = st
+				c.symModule[decl.Name.Lexeme] = mod
+			case *parser.EnumDecl:
+				et := &EnumType{Name: decl.Name.Lexeme, ByName: make(map[string]*EnumVariantDef)}
+				c.enums[decl.Name.Lexeme] = et
+				c.symModule[decl.Name.Lexeme] = mod
+			}
+		}
+	}
+
+	// Pass 1b: collect all fn signatures, resolve struct/enum fields.
 	for _, f := range files {
 		mod := fileModule[f]
 		for _, d := range f.Decls {
@@ -150,19 +168,13 @@ func (c *checker) checkProgram(files []*parser.File) error {
 					c.fnEffects[decl.Name.Lexeme] = decl.Effects
 				}
 			case *parser.StructDecl:
-				st, err := c.buildStructType(decl)
-				if err != nil {
+				if err := c.buildStructTypeFields(decl); err != nil {
 					return err
 				}
-				c.structs[decl.Name.Lexeme] = st
-				c.symModule[decl.Name.Lexeme] = mod
 			case *parser.EnumDecl:
-				et, err := c.buildEnumType(decl)
-				if err != nil {
+				if err := c.buildEnumTypeFields(decl); err != nil {
 					return err
 				}
-				c.enums[decl.Name.Lexeme] = et
-				c.symModule[decl.Name.Lexeme] = mod
 			case *parser.ExternFnDecl:
 				params := make([]Type, len(decl.Params))
 				for i, p := range decl.Params {
@@ -396,8 +408,17 @@ func (c *checker) checkFile(file *parser.File) error {
 	for name, ann := range BuiltinEffects {
 		c.fnEffects[name] = ann
 	}
-	// Pass 1: collect struct types, function signatures, and effects annotations.
-	// ModuleDecl and UseDecl are recorded for future scope enforcement; currently skipped.
+	// Pass 1a: Pre-register struct and enum types.
+	for _, decl := range file.Decls {
+		switch d := decl.(type) {
+		case *parser.StructDecl:
+			c.structs[d.Name.Lexeme] = &StructType{Name: d.Name.Lexeme, Fields: make(map[string]Type)}
+		case *parser.EnumDecl:
+			c.enums[d.Name.Lexeme] = &EnumType{Name: d.Name.Lexeme, ByName: make(map[string]*EnumVariantDef)}
+		}
+	}
+
+	// Pass 1b: collect function signatures, resolve struct types, and effects annotations.
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *parser.ModuleDecl, *parser.UseDecl:
@@ -413,17 +434,13 @@ func (c *checker) checkFile(file *parser.File) error {
 				c.fnEffects[d.Name.Lexeme] = d.Effects
 			}
 		case *parser.StructDecl:
-			st, err := c.buildStructType(d)
-			if err != nil {
+			if err := c.buildStructTypeFields(d); err != nil {
 				return err
 			}
-			c.structs[d.Name.Lexeme] = st
 		case *parser.EnumDecl:
-			et, err := c.buildEnumType(d)
-			if err != nil {
+			if err := c.buildEnumTypeFields(d); err != nil {
 				return err
 			}
-			c.enums[d.Name.Lexeme] = et
 		case *parser.ExternFnDecl:
 			params := make([]Type, len(d.Params))
 			for i, p := range d.Params {
@@ -474,29 +491,26 @@ func (c *checker) buildFnSig(d *parser.FnDecl) (*FnType, error) {
 	return &FnType{Params: params, Ret: ret}, nil
 }
 
-func (c *checker) buildStructType(d *parser.StructDecl) (*StructType, error) {
-	st := &StructType{Name: d.Name.Lexeme, Fields: make(map[string]Type)}
+func (c *checker) buildStructTypeFields(d *parser.StructDecl) error {
+	st := c.structs[d.Name.Lexeme]
 	for _, f := range d.Fields {
 		t, err := c.resolveTypeExpr(f.Type)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		st.Fields[f.Name.Lexeme] = t
 	}
-	return st, nil
+	return nil
 }
 
-func (c *checker) buildEnumType(d *parser.EnumDecl) (*EnumType, error) {
-	et := &EnumType{
-		Name:   d.Name.Lexeme,
-		ByName: make(map[string]*EnumVariantDef),
-	}
+func (c *checker) buildEnumTypeFields(d *parser.EnumDecl) error {
+	et := c.enums[d.Name.Lexeme]
 	for i, v := range d.Variants {
 		fields := make([]Type, len(v.Fields))
 		for j, f := range v.Fields {
 			t, err := c.resolveTypeExpr(f)
 			if err != nil {
-				return nil, err
+				return err
 			}
 			fields[j] = t
 		}
@@ -504,7 +518,7 @@ func (c *checker) buildEnumType(d *parser.EnumDecl) (*EnumType, error) {
 		et.Variants = append(et.Variants, vd)
 		et.ByName[v.Name.Lexeme] = vd
 	}
-	return et, nil
+	return nil
 }
 
 func (c *checker) resolveTypeExpr(te parser.TypeExpr) (Type, error) {
