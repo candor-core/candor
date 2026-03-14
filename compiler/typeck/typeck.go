@@ -1487,8 +1487,8 @@ func (c *checker) inferVecLen(e *parser.CallExpr, fn *parser.IdentExpr, sc *scop
 	if !ok || (gen.Con != "vec" && gen.Con != "ring") {
 		return nil, c.errorf(e.Args[0].Pos(), "vec_len() requires vec<T> or ring<T>, got %s", vecType)
 	}
-	c.record(fn, TI64)
-	return TI64, nil
+	c.record(fn, TU64)
+	return TU64, nil
 }
 
 // ── map built-in functions ────────────────────────────────────────────────────
@@ -1620,8 +1620,8 @@ func (c *checker) inferMapLen(e *parser.CallExpr, fn *parser.IdentExpr, sc *scop
 	if !ok || gen.Con != "map" || len(gen.Params) != 2 {
 		return nil, c.errorf(e.Args[0].Pos(), "map_len() requires map<K,V>, got %s", mapType)
 	}
-	c.record(fn, TI64)
-	return TI64, nil
+	c.record(fn, TU64)
+	return TU64, nil
 }
 
 func (c *checker) inferMapContains(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {

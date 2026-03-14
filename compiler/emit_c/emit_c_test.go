@@ -121,10 +121,11 @@ struct Point { x: u32, y: u32 }
 fn sum(p: Point) -> u32 { return p.x + p.y }
 `)
 	t.Logf("emitted C:\n%s", out)
-	assertContains(t, out, "typedef struct Point {")
+	assertContains(t, out, "typedef struct Point Point;")
+	assertContains(t, out, "struct Point {")
 	assertContains(t, out, "uint32_t x;")
 	assertContains(t, out, "uint32_t y;")
-	assertContains(t, out, "} Point;")
+	assertContains(t, out, "};")
 	assertContains(t, out, "uint32_t sum(")
 	assertContains(t, out, "Point p")
 	assertContains(t, out, "p.x")

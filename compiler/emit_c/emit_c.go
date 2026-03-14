@@ -1447,18 +1447,25 @@ func (e *emitter) emitExpr(expr parser.Expr, sb *strings.Builder) error {
 	case *parser.BlockExpr:
 		// Multi-statement match arm block.
 		// Emitted as a GNU statement expression: ({ stmt1; stmt2; ...; 0; })
-		// This allows a block to appear in expression position in C.
-		// Requires GCC or Clang (both already required by Candor's C backend).
-		// emitExpr has no depth parameter; match arms always appear at body
-		// depth 1 inside a function, so we write via the main sink at depth 2.
+		// emitStmt always writes to e.sb (the global builder), but we need
+		// the content in the local `sb` (the expression's buffer).
+		// Strategy: snapshot e.sb length, emit stmts, then slice the new bytes
+		// out of e.sb and append them to `sb`, then roll back e.sb.
 		sb.WriteString("({\n")
+		before := e.sb.Len()
 		for _, stmt := range ex.Stmts {
 			if err := e.emitStmt(stmt, 2); err != nil {
 				return err
 			}
 		}
-		// Trailing 0 gives the GNU statement expression a value of type int.
-		sb.WriteString(indent(2) + "0;\n")
+		e.writeln(indent(2) + "0;")
+		// Extract the newly appended content from e.sb and write into local sb.
+		sb.WriteString(e.sb.String()[before:])
+		// Trim the content we just moved out of e.sb by resetting to before.
+		// strings.Builder has no truncate, so rebuild from the prefix.
+		prefix := e.sb.String()[:before]
+		e.sb.Reset()
+		e.sb.WriteString(prefix)
 		sb.WriteString(indent(1) + "})")
 
 	case *parser.CallExpr:
@@ -2349,16 +2356,38 @@ func (e *emitter) emitMustOrMatch(x parser.Expr, arms []parser.MustArm, bodyType
 		}
 
 		armType := e.res.ExprTypes[arm.Body]
-		var bodyExpr strings.Builder
-		if err := e.emitExpr(arm.Body, &bodyExpr); err != nil {
-			return err
-		}
-		if armType != nil && armType.Equals(typeck.TNever) {
-			fmt.Fprintf(sb, "        %s;\n", bodyExpr.String())
-		} else if bodyC != "" {
-			fmt.Fprintf(sb, "        %s = %s;\n", res, bodyExpr.String())
+		// BlockExpr arms emit their statements directly into sb.
+		if blkArm, ok := arm.Body.(*parser.BlockExpr); ok {
+			for _, stmt := range blkArm.Stmts {
+				// Redirect: temporarily make e.sb point at sb so emitStmt writes there.
+				// We capture the old content, emit, then merge new content to sb.
+				before := e.sb.Len()
+				if err := e.emitStmt(stmt, 2); err != nil {
+					return err
+				}
+				newContent := e.sb.String()[before:]
+				// Prepend 8 spaces indent to each line for natural indentation.
+				fmt.Fprintf(sb, "        ")
+				fmt.Fprint(sb, newContent)
+				// Trim new content from e.sb.
+				oldContent := e.sb.String()[:before]
+				e.sb.Reset()
+				e.sb.WriteString(oldContent)
+			}
+			// BlockExpr arms yield unit; no result assignment needed.
+			_ = armType
 		} else {
-			fmt.Fprintf(sb, "        %s;\n", bodyExpr.String())
+			var bodyExpr strings.Builder
+			if err := e.emitExpr(arm.Body, &bodyExpr); err != nil {
+				return err
+			}
+			if armType != nil && armType.Equals(typeck.TNever) {
+				fmt.Fprintf(sb, "        %s;\n", bodyExpr.String())
+			} else if bodyC != "" {
+				fmt.Fprintf(sb, "        %s = %s;\n", res, bodyExpr.String())
+			} else {
+				fmt.Fprintf(sb, "        %s;\n", bodyExpr.String())
+			}
 		}
 	}
 	fmt.Fprintf(sb, "    }\n")
