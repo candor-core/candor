@@ -19,6 +19,7 @@ package typeck
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/scottcorleyg1/candor/compiler/lexer"
@@ -27,12 +28,43 @@ import (
 
 // Error is a type-check diagnostic with source position.
 type Error struct {
-	Tok lexer.Token
-	Msg string
+	Tok  lexer.Token
+	Msg  string
+	Hint string // optional suggestion, e.g. "did you mean X?"
 }
 
 func (e *Error) Error() string {
+	if e.Hint != "" {
+		return fmt.Sprintf("%s:%d:%d: %s\n    hint: %s", e.Tok.File, e.Tok.Line, e.Tok.Col, e.Msg, e.Hint)
+	}
 	return fmt.Sprintf("%s:%d:%d: %s", e.Tok.File, e.Tok.Line, e.Tok.Col, e.Msg)
+}
+
+// Warning is a non-fatal diagnostic (unused variable, shadowing, etc.).
+type Warning struct {
+	Tok  lexer.Token
+	Msg  string
+}
+
+func (w Warning) Error() string {
+	return fmt.Sprintf("%s:%d:%d: warning: %s", w.Tok.File, w.Tok.Line, w.Tok.Col, w.Msg)
+}
+
+// varUsage tracks how many times a let-bound variable is read, for unused-var warnings.
+type varUsage struct {
+	tok  lexer.Token
+	name string
+	uses int
+}
+
+// LambdaInfo holds type and metadata for a lambda expression.
+type LambdaInfo struct {
+	Node         *parser.LambdaExpr
+	Name         string   // generated C name, e.g. _cnd_lambda_1
+	Sig          *FnType  // resolved signature
+	Captures     []string // captured variable names (in order of first appearance)
+	CaptureTypes []Type   // parallel to Captures: the type of each captured variable
+	CaptureByRef []bool   // parallel to Captures: true if captured by pointer (outer var is mut)
 }
 
 // Result is the output of a successful type-check pass.
@@ -51,6 +83,30 @@ type Result struct {
 	// Only calls to pure (effects []) functions with all-constant args are included.
 	// Values are int64, float64, bool, string, or nil (unit).
 	ComptimeValues map[parser.Expr]interface{}
+	// Lambdas holds all lambda expressions in declaration order.
+	Lambdas []*LambdaInfo
+	// ExternFns is the set of extern function names (declared with extern fn).
+	ExternFns map[string]bool
+	// GenericInstances holds all monomorphized generic function instances.
+	GenericInstances []*GenericInstance
+	// CallSiteGeneric maps a call's Fn expression (IdentExpr) to its generic instance.
+	// Used by the emitter to choose the mangled name at each call site.
+	CallSiteGeneric map[parser.Expr]*GenericInstance
+	// MethodCalls maps a CallExpr to the mangled C name of the method being called.
+	// Set when the call is x.method(args) where method is defined in an impl block.
+	MethodCalls map[parser.Expr]string
+	// ImplDecls holds all impl blocks for the emitter to emit method bodies.
+	ImplDecls []*parser.ImplDecl
+	// TraitDecls holds all trait declarations (for documentation/future use).
+	TraitDecls []*parser.TraitDecl
+	// ImplForDecls holds all impl-for blocks for the emitter.
+	ImplForDecls []*parser.ImplForDecl
+	// Consts maps top-level constant names to their resolved types.
+	Consts map[string]Type
+	// ConstDecls holds all const declarations for the emitter.
+	ConstDecls []*parser.ConstDecl
+	// Warnings holds all non-fatal diagnostics (unused variables, shadowing, etc.).
+	Warnings []Warning
 }
 
 // Check type-checks a fully parsed File and returns a Result.
@@ -58,14 +114,22 @@ type Result struct {
 // enforced. Use CheckProgram for multi-file programs with enforcement.
 func Check(file *parser.File) (*Result, error) {
 	c := &checker{
-		exprTypes:    make(map[parser.Expr]Type),
-		fnSigs:       make(map[string]*FnType),
-		structs:      make(map[string]*StructType),
-		enums:        make(map[string]*EnumType),
-		fnEffects:    make(map[string]*parser.EffectsAnnotation),
-		fnDecls:      make(map[string]*parser.FnDecl),
-		externFns:    make(map[string]bool),
-		comptimeVals: make(map[parser.Expr]interface{}),
+		exprTypes:       make(map[parser.Expr]Type),
+		fnSigs:          make(map[string]*FnType),
+		structs:         make(map[string]*StructType),
+		enums:           make(map[string]*EnumType),
+		fnEffects:       make(map[string]*parser.EffectsAnnotation),
+		fnDecls:         make(map[string]*parser.FnDecl),
+		externFns:       make(map[string]bool),
+		comptimeVals:    make(map[parser.Expr]interface{}),
+		genericFns:      make(map[string]*parser.FnDecl),
+		genInstances:    make(map[string]*GenericInstance),
+		callSiteGeneric: make(map[parser.Expr]*GenericInstance),
+		methods:         make(map[string]map[string]*FnType),
+		methodCalls:     make(map[parser.Expr]string),
+		consts:          make(map[string]Type),
+		traits:          make(map[string]*TraitDef),
+		traitImpls:      make(map[string]map[string]bool),
 		// symModule intentionally nil — disables module enforcement
 	}
 	if err := c.checkFile(file); err != nil {
@@ -73,12 +137,23 @@ func Check(file *parser.File) (*Result, error) {
 	}
 	runComptimePass(c, []*parser.File{file})
 	return &Result{
-		ExprTypes:      c.exprTypes,
-		FnSigs:         c.fnSigs,
-		Structs:        c.structs,
-		Enums:          c.enums,
-		FnEffects:      c.fnEffects,
-		ComptimeValues: c.comptimeVals,
+		ExprTypes:        c.exprTypes,
+		FnSigs:           c.fnSigs,
+		Structs:          c.structs,
+		Enums:            c.enums,
+		FnEffects:        c.fnEffects,
+		ComptimeValues:   c.comptimeVals,
+		Lambdas:          c.lambdas,
+		ExternFns:        c.externFns,
+		GenericInstances: c.genInstanceList,
+		CallSiteGeneric:  c.callSiteGeneric,
+		MethodCalls:      c.methodCalls,
+		ImplDecls:        c.implDecls,
+		TraitDecls:       c.traitDecls,
+		ImplForDecls:     c.implForDecls,
+		Consts:           c.consts,
+		ConstDecls:       c.constDecls,
+		Warnings:         c.warnings,
 	}, nil
 }
 
@@ -88,27 +163,46 @@ func Check(file *parser.File) (*Result, error) {
 // Files with no module declaration share the root namespace (always accessible).
 func CheckProgram(files []*parser.File) (*Result, error) {
 	c := &checker{
-		exprTypes:    make(map[parser.Expr]Type),
-		fnSigs:       make(map[string]*FnType),
-		structs:      make(map[string]*StructType),
-		enums:        make(map[string]*EnumType),
-		fnEffects:    make(map[string]*parser.EffectsAnnotation),
-		fnDecls:      make(map[string]*parser.FnDecl),
-		externFns:    make(map[string]bool),
-		comptimeVals: make(map[parser.Expr]interface{}),
-		symModule:    make(map[string]string), // non-nil enables enforcement
+		exprTypes:       make(map[parser.Expr]Type),
+		fnSigs:          make(map[string]*FnType),
+		structs:         make(map[string]*StructType),
+		enums:           make(map[string]*EnumType),
+		fnEffects:       make(map[string]*parser.EffectsAnnotation),
+		fnDecls:         make(map[string]*parser.FnDecl),
+		externFns:       make(map[string]bool),
+		comptimeVals:    make(map[parser.Expr]interface{}),
+		genericFns:      make(map[string]*parser.FnDecl),
+		genInstances:    make(map[string]*GenericInstance),
+		callSiteGeneric: make(map[parser.Expr]*GenericInstance),
+		methods:         make(map[string]map[string]*FnType),
+		methodCalls:     make(map[parser.Expr]string),
+		consts:          make(map[string]Type),
+		traits:          make(map[string]*TraitDef),
+		traitImpls:      make(map[string]map[string]bool),
+		symModule:       make(map[string]string), // non-nil enables enforcement
 	}
 	if err := c.checkProgram(files); err != nil {
 		return nil, err
 	}
 	runComptimePass(c, files)
 	return &Result{
-		ExprTypes:      c.exprTypes,
-		FnSigs:         c.fnSigs,
-		Structs:        c.structs,
-		Enums:          c.enums,
-		FnEffects:      c.fnEffects,
-		ComptimeValues: c.comptimeVals,
+		ExprTypes:        c.exprTypes,
+		FnSigs:           c.fnSigs,
+		Structs:          c.structs,
+		Enums:            c.enums,
+		FnEffects:        c.fnEffects,
+		ComptimeValues:   c.comptimeVals,
+		Lambdas:          c.lambdas,
+		ExternFns:        c.externFns,
+		GenericInstances: c.genInstanceList,
+		CallSiteGeneric:  c.callSiteGeneric,
+		MethodCalls:      c.methodCalls,
+		ImplDecls:        c.implDecls,
+		TraitDecls:       c.traitDecls,
+		ImplForDecls:     c.implForDecls,
+		Consts:           c.consts,
+		ConstDecls:       c.constDecls,
+		Warnings:         c.warnings,
 	}, nil
 }
 
@@ -157,15 +251,25 @@ func (c *checker) checkProgram(files []*parser.File) error {
 		for _, d := range f.Decls {
 			switch decl := d.(type) {
 			case *parser.FnDecl:
-				sig, err := c.buildFnSig(decl)
-				if err != nil {
-					return err
-				}
-				c.fnSigs[decl.Name.Lexeme] = sig
-				c.symModule[decl.Name.Lexeme] = mod
-				c.fnDecls[decl.Name.Lexeme] = decl
-				if decl.Effects != nil {
-					c.fnEffects[decl.Name.Lexeme] = decl.Effects
+				if len(decl.TypeParams) > 0 {
+					// Generic function — defer until call-site monomorphization.
+					c.genericFns[decl.Name.Lexeme] = decl
+					if c.symModule != nil {
+						c.symModule[decl.Name.Lexeme] = mod
+					}
+				} else {
+					sig, err := c.buildFnSig(decl)
+					if err != nil {
+						return err
+					}
+					c.fnSigs[decl.Name.Lexeme] = sig
+					if c.symModule != nil {
+						c.symModule[decl.Name.Lexeme] = mod
+					}
+					c.fnDecls[decl.Name.Lexeme] = decl
+					if decl.Effects != nil {
+						c.fnEffects[decl.Name.Lexeme] = decl.Effects
+					}
 				}
 			case *parser.StructDecl:
 				if err := c.buildStructTypeFields(decl); err != nil {
@@ -194,6 +298,14 @@ func (c *checker) checkProgram(files []*parser.File) error {
 					c.fnEffects[decl.Name.Lexeme] = decl.Effects
 				}
 				c.externFns[decl.Name.Lexeme] = true
+			case *parser.ConstDecl:
+				if err := c.checkConstDecl(decl); err != nil {
+					return err
+				}
+			case *parser.ImplDecl:
+				if err := c.collectImplDecl(decl); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -240,9 +352,21 @@ func (c *checker) checkProgram(files []*parser.File) error {
 		c.currentUses = fileUses[f]
 		c.errs = nil
 		for _, d := range f.Decls {
-			if fn, ok := d.(*parser.FnDecl); ok {
-				if err := c.checkFnDecl(fn); err != nil {
-					c.errs = append(c.errs, err)
+			switch decl := d.(type) {
+			case *parser.FnDecl:
+				if len(decl.TypeParams) == 0 {
+					if err := c.checkFnDecl(decl); err != nil {
+						c.errs = append(c.errs, err)
+					}
+				}
+			case *parser.ImplDecl:
+				for _, m := range decl.Methods {
+					if len(m.TypeParams) == 0 {
+						mangledName := decl.TypeName.Lexeme + "_" + m.Name.Lexeme
+						if err := c.checkMethodBody(mangledName, m); err != nil {
+							c.errs = append(c.errs, err)
+						}
+					}
 				}
 			}
 		}
@@ -277,6 +401,15 @@ func (c *checker) checkModuleAccess(name string, tok lexer.Token) error {
 
 // ── Internal checker state ────────────────────────────────────────────────────
 
+// GenericInstance is a single concrete monomorphization of a generic function.
+type GenericInstance struct {
+	FnName      string            // original Candor name, e.g. "identity"
+	MangledName string            // C name, e.g. "identity__int64_t"
+	Sig         *FnType           // concrete resolved signature
+	Node        *parser.FnDecl    // AST node (for body emission)
+	Subst       map[string]Type   // type param name → concrete type
+}
+
 type checker struct {
 	exprTypes    map[parser.Expr]Type
 	fnSigs       map[string]*FnType
@@ -288,6 +421,37 @@ type checker struct {
 	comptimeVals map[parser.Expr]interface{}           // comptime-evaluated call results
 	curEffects   *parser.EffectsAnnotation             // effects of fn currently being checked
 	errs         []error                               // collected statement-level errors
+	warnings     []Warning                             // collected non-fatal diagnostics
+	letUsages    []*varUsage                           // let bindings in current function (reset per fn)
+
+	// impl / method support
+	methods     map[string]map[string]*FnType   // structName → methodName → sig
+	methodCalls map[parser.Expr]string           // CallExpr → mangled C name
+	implDecls   []*parser.ImplDecl               // all impl blocks (for emitter)
+
+	// trait / impl-for support
+	traits       map[string]*TraitDef          // trait name → definition
+	traitImpls   map[string]map[string]bool    // typeName → traitName → implemented
+	traitDecls   []*parser.TraitDecl           // all trait declarations (for Result)
+	implForDecls []*parser.ImplForDecl         // all impl-for blocks (for emitter)
+
+	// const support
+	consts     map[string]Type           // name → type
+	constDecls []*parser.ConstDecl       // all const decls (for emitter)
+
+	// Lambda tracking
+	lambdas     []*LambdaInfo
+	lambdaCount int
+
+	// Contract context
+	inEnsures bool // true when checking an ensures clause; enables old()
+
+	// Generic function tracking
+	genericFns      map[string]*parser.FnDecl            // name → generic fn decl
+	typeVarSubst    map[string]Type                       // active subst during monomorphization
+	genInstances    map[string]*GenericInstance           // mangledName → instance (dedup)
+	genInstanceList []*GenericInstance                    // ordered for emission
+	callSiteGeneric map[parser.Expr]*GenericInstance      // e.Fn → instance for call sites
 
 	// Module enforcement — nil in single-file (Check) mode, populated by CheckProgram.
 	symModule     map[string]string // top-level name → declaring module ("" = root/no module)
@@ -299,6 +463,7 @@ type checker struct {
 type varInfo struct {
 	typ     Type
 	mutable bool
+	usage   *varUsage // non-nil for let bindings; nil for params and built-ins
 }
 
 type scope struct {
@@ -338,6 +503,28 @@ func (s *scope) defineMut(name string, t Type) {
 	s.vars[name] = varInfo{typ: t, mutable: true}
 }
 
+// defineTracked is like define/defineMut but attaches a usage tracker for unused-variable warnings.
+func (s *scope) defineTracked(name string, t Type, mutable bool, u *varUsage) {
+	s.vars[name] = varInfo{typ: t, mutable: mutable, usage: u}
+}
+
+// allNames returns every name visible in this scope chain (deduplicated, innermost wins).
+func (s *scope) allNames() []string {
+	seen := make(map[string]bool)
+	var names []string
+	cur := s
+	for cur != nil {
+		for n := range cur.vars {
+			if !seen[n] {
+				seen[n] = true
+				names = append(names, n)
+			}
+		}
+		cur = cur.parent
+	}
+	return names
+}
+
 func (c *checker) record(expr parser.Expr, t Type) Type {
 	c.exprTypes[expr] = t
 	return t
@@ -345,6 +532,78 @@ func (c *checker) record(expr parser.Expr, t Type) Type {
 
 func (c *checker) errorf(tok lexer.Token, format string, args ...any) error {
 	return &Error{Tok: tok, Msg: fmt.Sprintf(format, args...)}
+}
+
+func (c *checker) warnf(tok lexer.Token, format string, args ...any) {
+	c.warnings = append(c.warnings, Warning{Tok: tok, Msg: fmt.Sprintf(format, args...)})
+}
+
+// beginFnTracking resets the per-function let-usage list.
+func (c *checker) beginFnTracking() {
+	c.letUsages = nil
+}
+
+// flushUnusedWarnings emits unused-variable warnings for the current function and clears the list.
+func (c *checker) flushUnusedWarnings() {
+	for _, u := range c.letUsages {
+		if u.uses == 0 {
+			c.warnf(u.tok, "unused variable %q; prefix with '_' to suppress", u.name)
+		}
+	}
+	c.letUsages = nil
+}
+
+// levenshtein returns the edit distance between two strings.
+func levenshtein(a, b string) int {
+	ra, rb := []rune(a), []rune(b)
+	m, n := len(ra), len(rb)
+	prev := make([]int, n+1)
+	curr := make([]int, n+1)
+	for j := 0; j <= n; j++ {
+		prev[j] = j
+	}
+	for i := 1; i <= m; i++ {
+		curr[0] = i
+		for j := 1; j <= n; j++ {
+			if ra[i-1] == rb[j-1] {
+				curr[j] = prev[j-1]
+			} else {
+				mn := prev[j]
+				if prev[j-1] < mn {
+					mn = prev[j-1]
+				}
+				if curr[j-1] < mn {
+					mn = curr[j-1]
+				}
+				curr[j] = 1 + mn
+			}
+		}
+		prev, curr = curr, prev
+	}
+	return prev[n]
+}
+
+// didYouMean returns a "did you mean X?" suggestion for name if a close candidate exists.
+func didYouMean(name string, candidates []string) string {
+	if len(name) < 2 {
+		return ""
+	}
+	best := ""
+	bestDist := 3 // max edit distance to suggest
+	for _, c := range candidates {
+		if c == name {
+			continue
+		}
+		d := levenshtein(name, c)
+		if d < bestDist {
+			bestDist = d
+			best = c
+		}
+	}
+	if best != "" {
+		return fmt.Sprintf("did you mean %q?", best)
+	}
+	return ""
 }
 
 // ── Pass 1: collect signatures ────────────────────────────────────────────────
@@ -380,6 +639,64 @@ var Builtins = map[string]*FnType{
 	"write_file":  {Params: []Type{TStr, TStr}, Ret: &GenType{Con: "result", Params: []Type{TUnit, TStr}}},
 	"append_file": {Params: []Type{TStr, TStr}, Ret: &GenType{Con: "result", Params: []Type{TUnit, TStr}}},
 	"print_char":  {Params: []Type{TU8}, Ret: TUnit},
+
+	// M2.1 std::math
+	"math_abs_i64":   {Params: []Type{TI64}, Ret: TI64},
+	"math_abs_f64":   {Params: []Type{TF64}, Ret: TF64},
+	"math_sqrt":      {Params: []Type{TF64}, Ret: TF64},
+	"math_pow":       {Params: []Type{TF64, TF64}, Ret: TF64},
+	"math_floor":     {Params: []Type{TF64}, Ret: TF64},
+	"math_ceil":      {Params: []Type{TF64}, Ret: TF64},
+	"math_sin":       {Params: []Type{TF64}, Ret: TF64},
+	"math_cos":       {Params: []Type{TF64}, Ret: TF64},
+	"math_min_i64":   {Params: []Type{TI64, TI64}, Ret: TI64},
+	"math_max_i64":   {Params: []Type{TI64, TI64}, Ret: TI64},
+	"math_min_f64":   {Params: []Type{TF64, TF64}, Ret: TF64},
+	"math_max_f64":   {Params: []Type{TF64, TF64}, Ret: TF64},
+	"math_clamp_i64": {Params: []Type{TI64, TI64, TI64}, Ret: TI64},
+	"math_clamp_f64": {Params: []Type{TF64, TF64, TF64}, Ret: TF64},
+
+	// M2.2 std::str
+	"str_repeat":   {Params: []Type{TStr, TI64}, Ret: TStr},
+	"str_trim":     {Params: []Type{TStr}, Ret: TStr},
+	"str_split":    {Params: []Type{TStr, TStr}, Ret: &GenType{Con: "vec", Params: []Type{TStr}}},
+	"str_replace":  {Params: []Type{TStr, TStr, TStr}, Ret: TStr},
+	"str_to_upper": {Params: []Type{TStr}, Ret: TStr},
+	"str_to_lower": {Params: []Type{TStr}, Ret: TStr},
+	"str_contains": {Params: []Type{TStr, TStr}, Ret: TBool},
+
+	// M2.3 std::io
+	"print_err":      {Params: []Type{TStr}, Ret: TUnit},
+	"read_all_lines": {Params: []Type{}, Ret: &GenType{Con: "vec", Params: []Type{TStr}}},
+	"read_csv_line":  {Params: []Type{}, Ret: &GenType{Con: "vec", Params: []Type{TStr}}},
+	"flush_stdout":   {Params: []Type{}, Ret: TUnit},
+
+	// M2.4 std::os
+	"os_args":   {Params: []Type{}, Ret: &GenType{Con: "vec", Params: []Type{TStr}}},
+	"os_getenv": {Params: []Type{TStr}, Ret: &GenType{Con: "option", Params: []Type{TStr}}},
+	"os_exit":   {Params: []Type{TI64}, Ret: TUnit},
+	"os_cwd":    {Params: []Type{}, Ret: TStr},
+
+	// M2.5 std::time
+	"time_now_ms":      {Params: []Type{}, Ret: TI64},
+	"time_now_mono_ns": {Params: []Type{}, Ret: TI64},
+	"time_sleep_ms":    {Params: []Type{TI64}, Ret: TUnit},
+
+	// M2.6 std::rand
+	"rand_u64":      {Params: []Type{}, Ret: TU64},
+	"rand_f64":      {Params: []Type{}, Ret: TF64},
+	"rand_range":    {Params: []Type{TI64, TI64}, Ret: TI64},
+	"rand_set_seed": {Params: []Type{TU64}, Ret: TUnit},
+
+	// M2.7 std::path
+	"path_join":     {Params: []Type{TStr, TStr}, Ret: TStr},
+	"path_dir":      {Params: []Type{TStr}, Ret: TStr},
+	"path_filename": {Params: []Type{TStr}, Ret: TStr},
+	"path_ext":      {Params: []Type{TStr}, Ret: TStr},
+	"path_exists":   {Params: []Type{TStr}, Ret: TBool},
+	"path_list_dir": {Params: []Type{TStr}, Ret: &GenType{Con: "result", Params: []Type{&GenType{Con: "vec", Params: []Type{TStr}}, TStr}}},
+	"path_mkdir":    {Params: []Type{TStr}, Ret: &GenType{Con: "result", Params: []Type{TUnit, TStr}}},
+	"path_remove":   {Params: []Type{TStr}, Ret: &GenType{Con: "result", Params: []Type{TUnit, TStr}}},
 }
 
 // BuiltinEffects records the known effects of built-in functions.
@@ -400,6 +717,30 @@ var BuiltinEffects = map[string]*parser.EffectsAnnotation{
 	"write_file":  {Kind: parser.EffectsDecl, Names: []string{"io"}},
 	"append_file": {Kind: parser.EffectsDecl, Names: []string{"io"}},
 	"print_char":  {Kind: parser.EffectsDecl, Names: []string{"io"}},
+	// M2.2 str (pure operations — no effect annotation needed)
+	// M2.3 io
+	"print_err":      {Kind: parser.EffectsDecl, Names: []string{"io"}},
+	"read_all_lines": {Kind: parser.EffectsDecl, Names: []string{"io"}},
+	"read_csv_line":  {Kind: parser.EffectsDecl, Names: []string{"io"}},
+	"flush_stdout":   {Kind: parser.EffectsDecl, Names: []string{"io"}},
+	// M2.4 os
+	"os_args":   {Kind: parser.EffectsDecl, Names: []string{"sys"}},
+	"os_getenv": {Kind: parser.EffectsDecl, Names: []string{"sys"}},
+	"os_exit":   {Kind: parser.EffectsDecl, Names: []string{"sys"}},
+	"os_cwd":    {Kind: parser.EffectsDecl, Names: []string{"sys"}},
+	// M2.5 time
+	"time_now_ms":      {Kind: parser.EffectsDecl, Names: []string{"time"}},
+	"time_now_mono_ns": {Kind: parser.EffectsDecl, Names: []string{"time"}},
+	"time_sleep_ms":    {Kind: parser.EffectsDecl, Names: []string{"time"}},
+	// M2.6 rand
+	"rand_u64":      {Kind: parser.EffectsDecl, Names: []string{"rand"}},
+	"rand_f64":      {Kind: parser.EffectsDecl, Names: []string{"rand"}},
+	"rand_range":    {Kind: parser.EffectsDecl, Names: []string{"rand"}},
+	"rand_set_seed": {Kind: parser.EffectsDecl, Names: []string{"rand"}},
+	// M2.7 path
+	"path_list_dir": {Kind: parser.EffectsDecl, Names: []string{"io"}},
+	"path_mkdir":    {Kind: parser.EffectsDecl, Names: []string{"io"}},
+	"path_remove":   {Kind: parser.EffectsDecl, Names: []string{"io"}},
 }
 
 func (c *checker) checkFile(file *parser.File) error {
@@ -410,13 +751,17 @@ func (c *checker) checkFile(file *parser.File) error {
 	for name, ann := range BuiltinEffects {
 		c.fnEffects[name] = ann
 	}
-	// Pass 1a: Pre-register struct and enum types.
+	// Pass 1a: Pre-register struct, enum types, and trait definitions.
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *parser.StructDecl:
 			c.structs[d.Name.Lexeme] = &StructType{Name: d.Name.Lexeme, Fields: make(map[string]Type)}
 		case *parser.EnumDecl:
 			c.enums[d.Name.Lexeme] = &EnumType{Name: d.Name.Lexeme, ByName: make(map[string]*EnumVariantDef)}
+		case *parser.TraitDecl:
+			if err := c.collectTraitDecl(d); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -426,14 +771,18 @@ func (c *checker) checkFile(file *parser.File) error {
 		case *parser.ModuleDecl, *parser.UseDecl:
 			_ = d // syntax accepted; enforcement is a future feature
 		case *parser.FnDecl:
-			sig, err := c.buildFnSig(d)
-			if err != nil {
-				return err
-			}
-			c.fnSigs[d.Name.Lexeme] = sig
-			c.fnDecls[d.Name.Lexeme] = d
-			if d.Effects != nil {
-				c.fnEffects[d.Name.Lexeme] = d.Effects
+			if len(d.TypeParams) > 0 {
+				c.genericFns[d.Name.Lexeme] = d
+			} else {
+				sig, err := c.buildFnSig(d)
+				if err != nil {
+					return err
+				}
+				c.fnSigs[d.Name.Lexeme] = sig
+				c.fnDecls[d.Name.Lexeme] = d
+				if d.Effects != nil {
+					c.fnEffects[d.Name.Lexeme] = d.Effects
+				}
 			}
 		case *parser.StructDecl:
 			if err := c.buildStructTypeFields(d); err != nil {
@@ -461,13 +810,46 @@ func (c *checker) checkFile(file *parser.File) error {
 				c.fnEffects[d.Name.Lexeme] = d.Effects
 			}
 			c.externFns[d.Name.Lexeme] = true
+		case *parser.ConstDecl:
+			if err := c.checkConstDecl(d); err != nil {
+				return err
+			}
+		case *parser.ImplDecl:
+			if err := c.collectImplDecl(d); err != nil {
+				return err
+			}
+		case *parser.ImplForDecl:
+			if err := c.collectImplForDecl(d); err != nil {
+				return err
+			}
 		}
 	}
-	// Pass 2: type-check function bodies. Non-code decls are skipped.
+	// Pass 2: type-check function bodies and impl / impl-for method bodies.
 	for _, decl := range file.Decls {
-		if d, ok := decl.(*parser.FnDecl); ok {
-			if err := c.checkFnDecl(d); err != nil {
-				return err
+		switch d := decl.(type) {
+		case *parser.FnDecl:
+			if len(d.TypeParams) == 0 {
+				if err := c.checkFnDecl(d); err != nil {
+					return err
+				}
+			}
+		case *parser.ImplDecl:
+			for _, m := range d.Methods {
+				if len(m.TypeParams) == 0 {
+					mangledName := d.TypeName.Lexeme + "_" + m.Name.Lexeme
+					if err := c.checkMethodBody(mangledName, m); err != nil {
+						return err
+					}
+				}
+			}
+		case *parser.ImplForDecl:
+			for _, m := range d.Methods {
+				if len(m.TypeParams) == 0 {
+					mangledName := d.TypeName.Lexeme + "_" + m.Name.Lexeme
+					if err := c.checkMethodBody(mangledName, m); err != nil {
+						return err
+					}
+				}
 			}
 		}
 	}
@@ -527,6 +909,12 @@ func (c *checker) resolveTypeExpr(te parser.TypeExpr) (Type, error) {
 	switch t := te.(type) {
 	case *parser.NamedType:
 		name := t.Name.Lexeme
+		// Check active type-variable substitution (during monomorphization).
+		if c.typeVarSubst != nil {
+			if subst, ok := c.typeVarSubst[name]; ok {
+				return subst, nil
+			}
+		}
 		if builtin, ok := BuiltinTypes[name]; ok {
 			return builtin, nil
 		}
@@ -567,6 +955,17 @@ func (c *checker) resolveTypeExpr(te parser.TypeExpr) (Type, error) {
 		}
 		return &FnType{Params: params, Ret: ret}, nil
 
+	case *parser.TupleTypeExpr:
+		elems := make([]Type, len(t.Elems))
+		for i, te2 := range t.Elems {
+			resolved, err := c.resolveTypeExpr(te2)
+			if err != nil {
+				return nil, err
+			}
+			elems[i] = resolved
+		}
+		return &TupleType{Elems: elems}, nil
+
 	default:
 		return nil, fmt.Errorf("unhandled TypeExpr %T", te)
 	}
@@ -575,6 +974,7 @@ func (c *checker) resolveTypeExpr(te parser.TypeExpr) (Type, error) {
 // ── Pass 2: check function bodies ────────────────────────────────────────────
 
 func (c *checker) checkFnDecl(d *parser.FnDecl) error {
+	c.beginFnTracking()
 	sig := c.fnSigs[d.Name.Lexeme]
 	sc := newScope(nil)
 	for i, p := range d.Params {
@@ -590,8 +990,10 @@ func (c *checker) checkFnDecl(d *parser.FnDecl) error {
 		clauseSc := newScope(sc)
 		if cc.Kind == parser.ContractEnsures {
 			clauseSc.define("result", retType)
+			c.inEnsures = true
 		}
 		condType, err := c.checkExpr(cc.Expr, clauseSc, TBool)
+		c.inEnsures = false
 		if err != nil {
 			c.curEffects = prev
 			return err
@@ -603,6 +1005,7 @@ func (c *checker) checkFnDecl(d *parser.FnDecl) error {
 	}
 
 	err := c.checkBlock(d.Body, sc, sig.Ret)
+	c.flushUnusedWarnings()
 	c.curEffects = prev
 	return err
 }
@@ -631,12 +1034,25 @@ func (c *checker) checkStmt(stmt parser.Stmt, sc *scope, retType Type) error {
 		return c.checkIfStmt(s, sc, retType)
 	case *parser.LoopStmt:
 		return c.checkBlock(s.Body, sc, retType)
+	case *parser.WhileStmt:
+		condType, err := c.checkExpr(s.Cond, sc, TBool)
+		if err != nil {
+			return err
+		}
+		if !condType.Equals(TBool) {
+			return c.errorf(s.WhileTok, "while condition must be bool, got %s", condType)
+		}
+		return c.checkBlock(s.Body, sc, retType)
 	case *parser.ForStmt:
 		return c.checkForStmt(s, sc, retType)
 	case *parser.BreakStmt:
 		return nil
+	case *parser.ContinueStmt:
+		return nil
 	case *parser.BlockStmt:
 		return c.checkBlock(s, sc, retType)
+	case *parser.TupleDestructureStmt:
+		return c.checkTupleDestructureStmt(s, sc)
 	case *parser.AssignStmt:
 		return c.checkAssignStmt(s, sc)
 	case *parser.FieldAssignStmt:
@@ -718,29 +1134,58 @@ func (c *checker) checkIndexAssignStmt(s *parser.IndexAssignStmt, sc *scope) err
 		return err
 	}
 	gen, ok := collType.(*GenType)
-	if !ok || gen.Con != "vec" || len(gen.Params) == 0 {
-		return c.errorf(s.Target.Pos(), "index assignment requires vec<T>, got %s", collType)
+	if !ok || len(gen.Params) == 0 {
+		return c.errorf(s.Target.Pos(), "index assignment requires vec<T>, ring<T>, or map<K,V>, got %s", collType)
 	}
-	elemType := gen.Params[0]
-	// Check the index is an integer type.
-	idxType, err := c.checkExpr(s.Target.Index, sc, TI64)
-	if err != nil {
-		return err
+
+	switch gen.Con {
+	case "map":
+		// m[k] = v — desugars to map_insert(&m, k, v)
+		if len(gen.Params) != 2 {
+			return c.errorf(s.Target.Pos(), "invalid map type %s", collType)
+		}
+		keyType, valType := gen.Params[0], gen.Params[1]
+		idxType, err := c.checkExpr(s.Target.Index, sc, keyType)
+		if err != nil {
+			return err
+		}
+		if _, ok2 := Coerce(idxType, keyType); !ok2 {
+			return c.errorf(s.Target.Index.Pos(), "map key type mismatch: got %s, expected %s", idxType, keyType)
+		}
+		rhs, err := c.checkExpr(s.Value, sc, valType)
+		if err != nil {
+			return err
+		}
+		coerced, ok2 := Coerce(rhs, valType)
+		if !ok2 {
+			return c.errorf(s.Value.Pos(), "cannot assign %s to map value of type %s", rhs, valType)
+		}
+		c.exprTypes[s.Value] = coerced
+		return nil
+
+	case "vec", "ring":
+		elemType := gen.Params[0]
+		idxType, err := c.checkExpr(s.Target.Index, sc, TI64)
+		if err != nil {
+			return err
+		}
+		if !IsIntType(idxType) {
+			return c.errorf(s.Target.Index.Pos(), "%s index must be an integer, got %s", gen.Con, idxType)
+		}
+		valType, err := c.checkExpr(s.Value, sc, elemType)
+		if err != nil {
+			return err
+		}
+		coerced, ok2 := Coerce(valType, elemType)
+		if !ok2 {
+			return c.errorf(s.Value.Pos(), "cannot assign %s to %s element of type %s", valType, gen.Con, elemType)
+		}
+		c.exprTypes[s.Value] = coerced
+		return nil
+
+	default:
+		return c.errorf(s.Target.Pos(), "index assignment requires vec<T>, ring<T>, or map<K,V>, got %s", collType)
 	}
-	if !IsIntType(idxType) {
-		return c.errorf(s.Target.Index.Pos(), "vec index must be an integer, got %s", idxType)
-	}
-	// Check the value.
-	valType, err := c.checkExpr(s.Value, sc, elemType)
-	if err != nil {
-		return err
-	}
-	coerced, ok2 := Coerce(valType, elemType)
-	if !ok2 {
-		return c.errorf(s.Value.Pos(), "cannot assign %s to vec element of type %s", valType, elemType)
-	}
-	c.exprTypes[s.Value] = coerced
-	return nil
 }
 
 // checkReceiverMutable walks a field-access chain to the root identifier and
@@ -789,11 +1234,23 @@ func (c *checker) checkLetStmt(s *parser.LetStmt, sc *scope) error {
 		valType = coerced
 		c.exprTypes[s.Value] = coerced
 	}
-	if s.Mut {
-		sc.defineMut(s.Name.Lexeme, valType)
-	} else {
-		sc.define(s.Name.Lexeme, valType)
+
+	name := s.Name.Lexeme
+	// Shadow warning: if the name already exists in any enclosing scope, warn.
+	if name != "_" && !strings.HasPrefix(name, "_") {
+		if _, ok := sc.lookup(name); ok {
+			c.warnf(s.Name, "variable %q shadows a binding in an outer scope", name)
+		}
 	}
+
+	// Track for unused-variable warnings (skip wildcard and _-prefixed names).
+	var u *varUsage
+	if name != "_" && !strings.HasPrefix(name, "_") {
+		u = &varUsage{tok: s.Name, name: name}
+		c.letUsages = append(c.letUsages, u)
+	}
+
+	sc.defineTracked(name, valType, s.Mut, u)
 	return nil
 }
 
@@ -908,8 +1365,34 @@ func (c *checker) inferExpr(expr parser.Expr, sc *scope, hint Type) (Type, error
 				return c.inferMapLen(e, ident, sc)
 			case "map_contains":
 				return c.inferMapContains(e, ident, sc)
+			case "set_new":
+				return c.inferSetNew(e, ident, sc, hint)
+			case "set_add":
+				return c.inferSetAdd(e, ident, sc)
+			case "set_remove":
+				return c.inferSetRemove(e, ident, sc)
+			case "set_contains":
+				return c.inferSetContains(e, ident, sc)
+			case "set_len":
+				return c.inferSetLen(e, ident, sc)
+			case "ring_new":
+				return c.inferRingNew(e, ident, sc, hint)
+			case "ring_push_back":
+				return c.inferRingPushBack(e, ident, sc)
+			case "ring_pop_front":
+				return c.inferRingPopFront(e, ident, sc)
+			case "ring_len":
+				return c.inferRingLen(e, ident, sc)
+			case "ring_is_empty":
+				return c.inferRingIsEmpty(e, ident, sc)
 			case "refmut":
 				return c.inferRefmutCall(e, sc)
+			}
+		}
+		// Method call: x.method(args) where Fn is a FieldExpr
+		if fe, ok := e.Fn.(*parser.FieldExpr); ok {
+			if mt, err2 := c.tryMethodCall(e, fe, sc); err2 == nil && mt != nil {
+				return mt, nil
 			}
 		}
 		return c.inferCallExpr(e, sc)
@@ -953,6 +1436,28 @@ func (c *checker) inferExpr(expr parser.Expr, sc *scope, hint Type) (Type, error
 		}
 		return c.record(e, TUnit), nil
 
+	case *parser.LambdaExpr:
+		return c.inferLambdaExpr(e, sc)
+
+	case *parser.OldExpr:
+		return c.inferOldExpr(e, sc)
+
+	case *parser.CastExpr:
+		if _, err := c.checkExpr(e.X, sc, nil); err != nil {
+			return nil, err
+		}
+		target, err := c.resolveTypeExpr(e.Target)
+		if err != nil {
+			return nil, err
+		}
+		return target, nil
+
+	case *parser.VecLitExpr:
+		return c.inferVecLitExpr(e, sc, hint)
+
+	case *parser.TupleLitExpr:
+		return c.inferTupleLitExpr(e, sc, hint)
+
 	default:
 		return nil, fmt.Errorf("unhandled Expr %T", expr)
 	}
@@ -970,7 +1475,15 @@ func (c *checker) inferIdentExpr(e *parser.IdentExpr, sc *scope) (Type, error) {
 	}
 
 	// Variable lookup
-	if t, ok := sc.lookup(name); ok {
+	if info, ok := sc.lookupInfo(name); ok {
+		if info.usage != nil {
+			info.usage.uses++
+		}
+		return info.typ, nil
+	}
+
+	// Constant lookup
+	if t, ok := c.consts[name]; ok {
 		return t, nil
 	}
 
@@ -988,7 +1501,16 @@ func (c *checker) inferIdentExpr(e *parser.IdentExpr, sc *scope) (Type, error) {
 		return &GenType{Con: name}, nil
 	}
 
-	return nil, c.errorf(e.Tok, "undefined identifier %q", name)
+	// Build candidate list for "did you mean?" suggestion.
+	candidates := sc.allNames()
+	for n := range c.fnSigs {
+		candidates = append(candidates, n)
+	}
+	for n := range c.consts {
+		candidates = append(candidates, n)
+	}
+	hint := didYouMean(name, candidates)
+	return nil, &Error{Tok: e.Tok, Msg: fmt.Sprintf("undefined identifier %q", name), Hint: hint}
 }
 
 func (c *checker) inferBinaryExpr(e *parser.BinaryExpr, sc *scope, hint Type) (Type, error) {
@@ -1106,6 +1628,13 @@ func (c *checker) inferUnaryExpr(e *parser.UnaryExpr, sc *scope, hint Type) (Typ
 }
 
 func (c *checker) inferCallExpr(e *parser.CallExpr, sc *scope) (Type, error) {
+	// Intercept calls to generic functions for monomorphization.
+	if ident, ok := e.Fn.(*parser.IdentExpr); ok {
+		if gDecl, ok := c.genericFns[ident.Tok.Lexeme]; ok {
+			return c.monomorphize(e, ident, gDecl, sc)
+		}
+	}
+
 	fnType, err := c.checkExpr(e.Fn, sc, nil)
 	if err != nil {
 		return nil, err
@@ -1149,6 +1678,187 @@ func (c *checker) inferCallExpr(e *parser.CallExpr, sc *scope) (Type, error) {
 		c.exprTypes[arg] = coerced
 	}
 	return sig.Ret, nil
+}
+
+// monomorphize instantiates a generic function call site.
+// It infers type arguments from the actual argument types, checks the body with
+// the substitution active (once per unique instantiation), and records the instance.
+func (c *checker) monomorphize(e *parser.CallExpr, ident *parser.IdentExpr, gDecl *parser.FnDecl, sc *scope) (Type, error) {
+	if len(e.Args) != len(gDecl.Params) {
+		return nil, c.errorf(e.LParen,
+			"%s: argument count mismatch: expected %d, got %d",
+			gDecl.Name.Lexeme, len(gDecl.Params), len(e.Args))
+	}
+
+	// Build typeParams set.
+	typeParams := make(map[string]bool, len(gDecl.TypeParams))
+	for _, tp := range gDecl.TypeParams {
+		typeParams[tp.Lexeme] = true
+	}
+
+	// Infer argument types.
+	argTypes := make([]Type, len(e.Args))
+	for i, arg := range e.Args {
+		t, err := c.checkExpr(arg, sc, nil)
+		if err != nil {
+			return nil, err
+		}
+		// Default unresolved literals to their canonical type.
+		if t == TIntLit {
+			t = TI64
+		}
+		if t == TFloatLit {
+			t = TF64
+		}
+		argTypes[i] = t
+		c.exprTypes[arg] = t
+	}
+
+	// Unify param type exprs against arg types to build substitution.
+	subst := make(map[string]Type)
+	for i, param := range gDecl.Params {
+		if err := c.unifyTypeExpr(param.Type, argTypes[i], typeParams, subst); err != nil {
+			return nil, c.errorf(e.Args[i].Pos(),
+				"cannot infer type param for argument %d of %s: %v", i+1, gDecl.Name.Lexeme, err)
+		}
+	}
+
+	// Verify all type params were resolved.
+	for _, tp := range gDecl.TypeParams {
+		if _, ok := subst[tp.Lexeme]; !ok {
+			return nil, c.errorf(ident.Tok,
+				"cannot infer type parameter %q for %s", tp.Lexeme, gDecl.Name.Lexeme)
+		}
+	}
+
+	// Check trait bounds: for each type param with bounds, verify the concrete
+	// type implements all required traits.
+	if len(gDecl.TypeBounds) > 0 {
+		for tpName, requiredTraits := range gDecl.TypeBounds {
+			concreteType := subst[tpName]
+			// Extract the underlying type name for trait lookup.
+			typeName := ""
+			switch ct := concreteType.(type) {
+			case *StructType:
+				typeName = ct.Name
+			case *EnumType:
+				typeName = ct.Name
+			}
+			for _, traitName := range requiredTraits {
+				if typeName == "" || !c.traitImpls[typeName][traitName] {
+					return nil, c.errorf(ident.Tok,
+						"type %s does not implement trait %s (required by type parameter %s of %s)",
+						concreteType, traitName, tpName, gDecl.Name.Lexeme)
+				}
+			}
+		}
+	}
+
+	// Build the mangled C name from the substituted types (ordered by TypeParams list).
+	mangler := strings.NewReplacer("<", "_", ">", "_", ",", "_", " ", "_", "(", "_", ")", "_", "*", "ptr", "-", "_")
+	var parts []string
+	for _, tp := range gDecl.TypeParams {
+		parts = append(parts, mangler.Replace(subst[tp.Lexeme].String()))
+	}
+	mangledName := gDecl.Name.Lexeme + "__" + strings.Join(parts, "__")
+
+	// Apply substitution to build concrete signature.
+	prevSubst := c.typeVarSubst
+	c.typeVarSubst = subst
+
+	sig, err := c.buildFnSig(gDecl)
+	if err != nil {
+		c.typeVarSubst = prevSubst
+		return nil, err
+	}
+
+	// Instantiate (check body) if not already done for this mangled name.
+	if _, exists := c.genInstances[mangledName]; !exists {
+		inst := &GenericInstance{
+			FnName:      gDecl.Name.Lexeme,
+			MangledName: mangledName,
+			Sig:         sig,
+			Node:        gDecl,
+			Subst:       subst,
+		}
+		c.genInstances[mangledName] = inst
+		c.genInstanceList = append(c.genInstanceList, inst)
+
+		// Type-check the body under the substitution.
+		bodySc := newScope(nil)
+		for i, p := range gDecl.Params {
+			bodySc.define(p.Name.Lexeme, sig.Params[i])
+		}
+		if err := c.checkBlock(gDecl.Body, bodySc, sig.Ret); err != nil {
+			c.typeVarSubst = prevSubst
+			return nil, err
+		}
+	}
+
+	c.typeVarSubst = prevSubst
+
+	// Record the call expression's return type and the call site → instance mapping.
+	ret := sig.Ret
+	c.exprTypes[e] = ret
+	c.callSiteGeneric[e.Fn] = c.genInstances[mangledName]
+
+	return ret, nil
+}
+
+// unifyTypeExpr matches a declared TypeExpr (which may mention type param names)
+// against a concrete resolved Type, populating subst.
+func (c *checker) unifyTypeExpr(te parser.TypeExpr, concrete Type, typeParams map[string]bool, subst map[string]Type) error {
+	switch t := te.(type) {
+	case *parser.NamedType:
+		name := t.Name.Lexeme
+		if typeParams[name] {
+			// Bind or check consistency.
+			if existing, ok := subst[name]; ok {
+				if !existing.Equals(concrete) {
+					return fmt.Errorf("type parameter %q: conflicting types %s and %s", name, existing, concrete)
+				}
+			} else {
+				subst[name] = concrete
+			}
+			return nil
+		}
+		// Concrete named type — must match.
+		resolved, err := c.resolveTypeExpr(te)
+		if err != nil {
+			return err
+		}
+		if !resolved.Equals(concrete) {
+			return fmt.Errorf("expected %s, got %s", resolved, concrete)
+		}
+		return nil
+
+	case *parser.GenericType:
+		gen, ok := concrete.(*GenType)
+		if !ok || gen.Con != t.Name.Lexeme || len(gen.Params) != len(t.Params) {
+			return fmt.Errorf("expected %s<...>, got %s", t.Name.Lexeme, concrete)
+		}
+		for i, p := range t.Params {
+			if err := c.unifyTypeExpr(p, gen.Params[i], typeParams, subst); err != nil {
+				return err
+			}
+		}
+		return nil
+
+	case *parser.FnType:
+		ft, ok := concrete.(*FnType)
+		if !ok || len(ft.Params) != len(t.Params) {
+			return fmt.Errorf("expected fn type, got %s", concrete)
+		}
+		for i, p := range t.Params {
+			if err := c.unifyTypeExpr(p, ft.Params[i], typeParams, subst); err != nil {
+				return err
+			}
+		}
+		return c.unifyTypeExpr(t.RetType, ft.Ret, typeParams, subst)
+
+	default:
+		return fmt.Errorf("unsupported type expression %T in unification", te)
+	}
 }
 
 // checkEffectsCompat enforces that callee's effects are compatible with the
@@ -1204,6 +1914,14 @@ func (c *checker) inferFieldExpr(e *parser.FieldExpr, sc *scope) (Type, error) {
 	if gen, ok := recvType.(*GenType); ok &&
 		(gen.Con == "ref" || gen.Con == "refmut") && len(gen.Params) > 0 {
 		recvType = gen.Params[0]
+	}
+	// Tuple index: x.0, x.1, ...
+	if tt, ok := recvType.(*TupleType); ok {
+		idx, err2 := strconv.Atoi(e.Field.Lexeme)
+		if err2 != nil || idx < 0 || idx >= len(tt.Elems) {
+			return nil, c.errorf(e.Field, "tuple index %s out of range (len %d)", e.Field.Lexeme, len(tt.Elems))
+		}
+		return tt.Elems[idx], nil
 	}
 	st, ok := recvType.(*StructType)
 	if !ok {
@@ -1648,6 +2366,415 @@ func (c *checker) inferMapContains(e *parser.CallExpr, fn *parser.IdentExpr, sc 
 	return TBool, nil
 }
 
+func (c *checker) inferLambdaExpr(e *parser.LambdaExpr, sc *scope) (Type, error) {
+	// Resolve parameter types.
+	params := make([]Type, len(e.Params))
+	for i, p := range e.Params {
+		t, err := c.resolveTypeExpr(p.Type)
+		if err != nil {
+			return nil, err
+		}
+		params[i] = t
+	}
+	retType, err := c.resolveTypeExpr(e.RetType)
+	if err != nil {
+		return nil, err
+	}
+	sig := &FnType{Params: params, Ret: retType}
+
+	// Type-check the body in a new scope with the parameters defined.
+	bodySc := newScope(sc)
+	for i, p := range e.Params {
+		bodySc.define(p.Name.Lexeme, params[i])
+	}
+	if err := c.checkBlock(e.Body, bodySc, retType); err != nil {
+		return nil, err
+	}
+
+	// Register the lambda with capture analysis.
+	c.lambdaCount++
+	name := fmt.Sprintf("_cnd_lambda_%d", c.lambdaCount)
+
+	// Determine the set of names that are lambda parameters or let-bindings inside.
+	paramNames := make(map[string]bool)
+	for _, p := range e.Params {
+		paramNames[p.Name.Lexeme] = true
+	}
+	collectLetNames(e.Body.Stmts, paramNames)
+
+	// Walk the body collecting free variable references.
+	seen := make(map[string]bool)
+	var captures []string
+	var captureTypes []Type
+	var captureByRef []bool
+	for _, stmt := range e.Body.Stmts {
+		walkIdentsInStmt(stmt, func(name string) {
+			if seen[name] || paramNames[name] {
+				return
+			}
+			if _, isFn := c.fnSigs[name]; isFn {
+				return
+			}
+			if info, ok := sc.lookupInfo(name); ok {
+				seen[name] = true
+				captures = append(captures, name)
+				captureTypes = append(captureTypes, info.typ)
+				// Mutable outer variables are captured by pointer so mutations are visible.
+				captureByRef = append(captureByRef, info.mutable)
+			}
+		})
+	}
+
+	info := &LambdaInfo{Node: e, Name: name, Sig: sig, Captures: captures, CaptureTypes: captureTypes, CaptureByRef: captureByRef}
+	c.lambdas = append(c.lambdas, info)
+
+	return c.record(e, sig), nil
+}
+
+// collectLetNames adds all names bound by let statements (at any depth) in stmts to out.
+func collectLetNames(stmts []parser.Stmt, out map[string]bool) {
+	for _, s := range stmts {
+		switch v := s.(type) {
+		case *parser.LetStmt:
+			out[v.Name.Lexeme] = true
+		case *parser.IfStmt:
+			collectLetNames(v.Then.Stmts, out)
+			if v.Else != nil {
+				if blk, ok := v.Else.(*parser.BlockStmt); ok {
+					collectLetNames(blk.Stmts, out)
+				} else if elif, ok := v.Else.(*parser.IfStmt); ok {
+					collectLetNames([]parser.Stmt{elif}, out)
+				}
+			}
+		case *parser.LoopStmt:
+			collectLetNames(v.Body.Stmts, out)
+		case *parser.ForStmt:
+			out[v.Var.Lexeme] = true
+			collectLetNames(v.Body.Stmts, out)
+		case *parser.BlockStmt:
+			collectLetNames(v.Stmts, out)
+		}
+	}
+}
+
+// walkIdentsInStmt visits every IdentExpr leaf in a statement and calls fn with its name.
+func walkIdentsInStmt(s parser.Stmt, fn func(string)) {
+	switch v := s.(type) {
+	case *parser.LetStmt:
+		walkIdentsInExpr(v.Value, fn)
+	case *parser.AssignStmt:
+		walkIdentsInExpr(v.Value, fn)
+	case *parser.ReturnStmt:
+		if v.Value != nil {
+			walkIdentsInExpr(v.Value, fn)
+		}
+	case *parser.ExprStmt:
+		walkIdentsInExpr(v.X, fn)
+	case *parser.IfStmt:
+		walkIdentsInExpr(v.Cond, fn)
+		for _, st := range v.Then.Stmts {
+			walkIdentsInStmt(st, fn)
+		}
+		if v.Else != nil {
+			walkIdentsInStmt(v.Else, fn)
+		}
+	case *parser.BlockStmt:
+		for _, st := range v.Stmts {
+			walkIdentsInStmt(st, fn)
+		}
+	case *parser.LoopStmt:
+		for _, st := range v.Body.Stmts {
+			walkIdentsInStmt(st, fn)
+		}
+	case *parser.ForStmt:
+		walkIdentsInExpr(v.Collection, fn)
+		for _, st := range v.Body.Stmts {
+			walkIdentsInStmt(st, fn)
+		}
+	case *parser.BreakStmt, *parser.ContinueStmt:
+		// no exprs
+	}
+}
+
+// walkIdentsInExpr visits every IdentExpr leaf in an expression and calls fn.
+func walkIdentsInExpr(e parser.Expr, fn func(string)) {
+	if e == nil {
+		return
+	}
+	switch v := e.(type) {
+	case *parser.IdentExpr:
+		fn(v.Tok.Lexeme)
+	case *parser.IntLitExpr, *parser.FloatLitExpr, *parser.StringLitExpr, *parser.BoolLitExpr:
+		// leaves — no idents
+	case *parser.BinaryExpr:
+		walkIdentsInExpr(v.Left, fn)
+		walkIdentsInExpr(v.Right, fn)
+	case *parser.UnaryExpr:
+		walkIdentsInExpr(v.Operand, fn)
+	case *parser.CallExpr:
+		walkIdentsInExpr(v.Fn, fn)
+		for _, a := range v.Args {
+			walkIdentsInExpr(a, fn)
+		}
+	case *parser.FieldExpr:
+		walkIdentsInExpr(v.Receiver, fn)
+	case *parser.IndexExpr:
+		walkIdentsInExpr(v.Collection, fn)
+		walkIdentsInExpr(v.Index, fn)
+	case *parser.StructLitExpr:
+		for _, f := range v.Fields {
+			walkIdentsInExpr(f.Value, fn)
+		}
+	case *parser.MatchExpr:
+		walkIdentsInExpr(v.X, fn)
+		for _, arm := range v.Arms {
+			walkIdentsInExpr(arm.Body, fn)
+		}
+	case *parser.MustExpr:
+		walkIdentsInExpr(v.X, fn)
+		for _, arm := range v.Arms {
+			walkIdentsInExpr(arm.Body, fn)
+		}
+	case *parser.LambdaExpr:
+		// Don't recurse into nested lambdas — they have their own capture analysis.
+	case *parser.OldExpr:
+		walkIdentsInExpr(v.X, fn)
+	case *parser.BlockExpr:
+		for _, st := range v.Stmts {
+			walkIdentsInStmt(st, fn)
+		}
+	case *parser.PathExpr:
+		// enum variant path — no free variables
+	case *parser.ReturnExpr:
+		walkIdentsInExpr(v.Value, fn)
+	case *parser.BreakExpr:
+		// no exprs
+	}
+}
+
+func (c *checker) inferOldExpr(e *parser.OldExpr, sc *scope) (Type, error) {
+	if !c.inEnsures {
+		return nil, c.errorf(e.OldTok, "old() may only be used inside ensures clauses")
+	}
+	// Prevent nested old(old(...)).
+	prev := c.inEnsures
+	c.inEnsures = false
+	innerType, err := c.checkExpr(e.X, sc, nil)
+	c.inEnsures = prev
+	if err != nil {
+		return nil, err
+	}
+	return c.record(e, innerType), nil
+}
+
+func (c *checker) inferSetNew(e *parser.CallExpr, ident *parser.IdentExpr, sc *scope, hint Type) (Type, error) {
+	if len(e.Args) != 0 {
+		return nil, c.errorf(e.LParen, "set_new() takes no arguments")
+	}
+	var elemType Type
+	if gen, ok := hint.(*GenType); ok && gen.Con == "set" && len(gen.Params) == 1 {
+		elemType = gen.Params[0]
+	}
+	if elemType == nil {
+		return nil, c.errorf(ident.Tok, "set_new() requires a type annotation to infer element type")
+	}
+	t := &GenType{Con: "set", Params: []Type{elemType}}
+	c.record(ident, t)
+	return t, nil
+}
+
+func (c *checker) inferSetAdd(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 2 {
+		return nil, c.errorf(e.LParen, "set_add() takes 2 arguments: (set, value)")
+	}
+	setType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := setType.(*GenType)
+	if !ok || gen.Con != "set" || len(gen.Params) != 1 {
+		return nil, c.errorf(e.Args[0].Pos(), "set_add() first argument must be set<T>, got %s", setType)
+	}
+	elemType := gen.Params[0]
+	vt, err := c.checkExpr(e.Args[1], sc, elemType)
+	if err != nil {
+		return nil, err
+	}
+	if coerced, ok2 := Coerce(vt, elemType); ok2 {
+		c.exprTypes[e.Args[1]] = coerced
+	} else {
+		return nil, c.errorf(e.Args[1].Pos(), "set_add() value type %s does not match set element type %s", vt, elemType)
+	}
+	c.record(fn, TUnit)
+	return TUnit, nil
+}
+
+func (c *checker) inferSetRemove(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 2 {
+		return nil, c.errorf(e.LParen, "set_remove() takes 2 arguments: (set, value)")
+	}
+	setType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := setType.(*GenType)
+	if !ok || gen.Con != "set" || len(gen.Params) != 1 {
+		return nil, c.errorf(e.Args[0].Pos(), "set_remove() first argument must be set<T>, got %s", setType)
+	}
+	keyType := gen.Params[0]
+	kt, err := c.checkExpr(e.Args[1], sc, keyType)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := Coerce(kt, keyType); !ok {
+		return nil, c.errorf(e.Args[1].Pos(), "set_remove() value type %s does not match set element type %s", kt, keyType)
+	}
+	c.record(fn, TBool)
+	return TBool, nil
+}
+
+func (c *checker) inferSetContains(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 2 {
+		return nil, c.errorf(e.LParen, "set_contains() takes 2 arguments: (set, value)")
+	}
+	setType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := setType.(*GenType)
+	if !ok || gen.Con != "set" || len(gen.Params) != 1 {
+		return nil, c.errorf(e.Args[0].Pos(), "set_contains() first argument must be set<T>, got %s", setType)
+	}
+	keyType := gen.Params[0]
+	kt, err := c.checkExpr(e.Args[1], sc, keyType)
+	if err != nil {
+		return nil, err
+	}
+	if _, ok := Coerce(kt, keyType); !ok {
+		return nil, c.errorf(e.Args[1].Pos(), "set_contains() value type %s does not match set element type %s", kt, keyType)
+	}
+	c.record(fn, TBool)
+	return TBool, nil
+}
+
+func (c *checker) inferSetLen(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 1 {
+		return nil, c.errorf(e.LParen, "set_len() takes 1 argument")
+	}
+	setType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := setType.(*GenType)
+	if !ok || gen.Con != "set" || len(gen.Params) != 1 {
+		return nil, c.errorf(e.Args[0].Pos(), "set_len() requires set<T>, got %s", setType)
+	}
+	c.record(fn, TU64)
+	return TU64, nil
+}
+
+// ── ring<T> built-in functions ────────────────────────────────────────────────
+
+func (c *checker) inferRingNew(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope, hint Type) (Type, error) {
+	if len(e.Args) != 1 {
+		return nil, c.errorf(e.LParen, "ring_new() takes 1 argument: capacity (u64)")
+	}
+	capType, err := c.checkExpr(e.Args[0], sc, TU64)
+	if err != nil {
+		return nil, err
+	}
+	coerced, ok := Coerce(capType, TU64)
+	if !ok {
+		return nil, c.errorf(e.Args[0].Pos(), "ring_new() capacity must be u64, got %s", capType)
+	}
+	c.exprTypes[e.Args[0]] = coerced
+	var elemType Type
+	if gen, ok2 := hint.(*GenType); ok2 && gen.Con == "ring" && len(gen.Params) > 0 {
+		elemType = gen.Params[0]
+	}
+	if elemType == nil {
+		return nil, c.errorf(fn.Tok, "ring_new() requires a type annotation to infer element type")
+	}
+	t := &GenType{Con: "ring", Params: []Type{elemType}}
+	c.record(fn, t)
+	return t, nil
+}
+
+func (c *checker) inferRingPushBack(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 2 {
+		return nil, c.errorf(e.LParen, "ring_push_back() takes 2 arguments: (ring, value)")
+	}
+	ringType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := ringType.(*GenType)
+	if !ok || gen.Con != "ring" || len(gen.Params) != 1 {
+		return nil, c.errorf(e.Args[0].Pos(), "ring_push_back() first argument must be ring<T>, got %s", ringType)
+	}
+	elemType := gen.Params[0]
+	valType, err := c.checkExpr(e.Args[1], sc, elemType)
+	if err != nil {
+		return nil, err
+	}
+	coerced, ok := Coerce(valType, elemType)
+	if !ok {
+		return nil, c.errorf(e.Args[1].Pos(), "ring_push_back() value type %s does not match element type %s", valType, elemType)
+	}
+	c.exprTypes[e.Args[1]] = coerced
+	c.record(fn, TUnit)
+	return TUnit, nil
+}
+
+func (c *checker) inferRingPopFront(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 1 {
+		return nil, c.errorf(e.LParen, "ring_pop_front() takes 1 argument: (ring)")
+	}
+	ringType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := ringType.(*GenType)
+	if !ok || gen.Con != "ring" || len(gen.Params) != 1 {
+		return nil, c.errorf(e.Args[0].Pos(), "ring_pop_front() argument must be ring<T>, got %s", ringType)
+	}
+	ret := &GenType{Con: "option", Params: []Type{gen.Params[0]}}
+	c.record(fn, ret)
+	return ret, nil
+}
+
+func (c *checker) inferRingLen(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 1 {
+		return nil, c.errorf(e.LParen, "ring_len() takes 1 argument")
+	}
+	ringType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := ringType.(*GenType)
+	if !ok || gen.Con != "ring" {
+		return nil, c.errorf(e.Args[0].Pos(), "ring_len() requires ring<T>, got %s", ringType)
+	}
+	c.record(fn, TU64)
+	return TU64, nil
+}
+
+func (c *checker) inferRingIsEmpty(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 1 {
+		return nil, c.errorf(e.LParen, "ring_is_empty() takes 1 argument")
+	}
+	ringType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := ringType.(*GenType)
+	if !ok || gen.Con != "ring" {
+		return nil, c.errorf(e.Args[0].Pos(), "ring_is_empty() requires ring<T>, got %s", ringType)
+	}
+	c.record(fn, TBool)
+	return TBool, nil
+}
+
 func (c *checker) inferConstructorCall(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope, hint Type) (Type, error) {
 	switch fn.Tok.Type {
 	case lexer.TokSome:
@@ -1820,10 +2947,12 @@ func (c *checker) checkForStmt(s *parser.ForStmt, sc *scope, retType Type) error
 		loopSc.define(s.Var2.Lexeme, gen.Params[1])
 		c.record(&parser.IdentExpr{Tok: *s.Var2}, gen.Params[1])
 	} else {
-		// existing vec/ring handling
 		gen, ok := collType.(*GenType)
-		if !ok || (gen.Con != "vec" && gen.Con != "ring") || len(gen.Params) == 0 {
-			return c.errorf(s.InTok, "for...in requires vec<T> or ring<T>, got %s", collType)
+		if !ok || len(gen.Params) == 0 {
+			return c.errorf(s.InTok, "for...in requires vec<T>, ring<T>, or set<T>, got %s", collType)
+		}
+		if gen.Con != "vec" && gen.Con != "ring" && gen.Con != "set" {
+			return c.errorf(s.InTok, "for...in requires vec<T>, ring<T>, or set<T>, got %s", collType)
 		}
 		loopSc.define(s.Var.Lexeme, gen.Params[0])
 		c.record(&parser.IdentExpr{Tok: s.Var}, gen.Params[0])
@@ -1887,6 +3016,20 @@ func (c *checker) inferStructLitExpr(e *parser.StructLitExpr, sc *scope) (Type, 
 	if err := c.checkModuleAccess(e.TypeName.Lexeme, e.TypeName); err != nil {
 		return nil, err
 	}
+
+	// Struct update syntax: Point { ..base, x: 1 }
+	// When Base is present, fields not listed are copied from the base expression.
+	if e.Base != nil {
+		baseType, err := c.checkExpr(e.Base, sc, st)
+		if err != nil {
+			return nil, err
+		}
+		if !baseType.Equals(st) {
+			return nil, c.errorf(e.TypeName,
+				"struct update base type %s does not match struct %s", baseType, st.Name)
+		}
+	}
+
 	provided := make(map[string]bool, len(e.Fields))
 	for _, fi := range e.Fields {
 		if _, ok := st.Fields[fi.Name.Lexeme]; !ok {
@@ -1908,10 +3051,277 @@ func (c *checker) inferStructLitExpr(e *parser.StructLitExpr, sc *scope) (Type, 
 		}
 		c.exprTypes[fi.Value] = coerced
 	}
-	for name := range st.Fields {
-		if !provided[name] {
-			return nil, c.errorf(e.TypeName, "missing field %q in struct literal for %s", name, st.Name)
+	// Without a base, all fields must be provided.
+	if e.Base == nil {
+		for name := range st.Fields {
+			if !provided[name] {
+				return nil, c.errorf(e.TypeName, "missing field %q in struct literal for %s", name, st.Name)
+			}
 		}
 	}
 	return st, nil
+}
+
+// ── New feature helpers ───────────────────────────────────────────────────────
+
+// checkConstDecl type-checks a module-level const declaration and registers it.
+func (c *checker) checkConstDecl(d *parser.ConstDecl) error {
+	typ, err := c.resolveTypeExpr(d.Type)
+	if err != nil {
+		return err
+	}
+	// Type-check value in an empty scope (consts must be literals / constant exprs).
+	valType, err := c.checkExpr(d.Value, newScope(nil), typ)
+	if err != nil {
+		return err
+	}
+	coerced, ok := Coerce(valType, typ)
+	if !ok {
+		return c.errorf(d.ConstTok, "const %s: cannot use %s as %s", d.Name.Lexeme, valType, typ)
+	}
+	c.exprTypes[d.Value] = coerced
+	c.consts[d.Name.Lexeme] = typ
+	c.constDecls = append(c.constDecls, d)
+	return nil
+}
+
+// collectImplDecl registers all method signatures from an impl block.
+func (c *checker) collectImplDecl(d *parser.ImplDecl) error {
+	typeName := d.TypeName.Lexeme
+	if c.methods[typeName] == nil {
+		c.methods[typeName] = make(map[string]*FnType)
+	}
+	for _, m := range d.Methods {
+		sig, err := c.buildFnSig(m)
+		if err != nil {
+			return err
+		}
+		mangledName := typeName + "_" + m.Name.Lexeme
+		c.fnSigs[mangledName] = sig
+		c.methods[typeName][m.Name.Lexeme] = sig
+	}
+	c.implDecls = append(c.implDecls, d)
+	return nil
+}
+
+// collectTraitDecl registers a trait definition so its methods can be verified
+// against impl-for blocks and used as bounds on generic type parameters.
+func (c *checker) collectTraitDecl(d *parser.TraitDecl) error {
+	def := &TraitDef{Name: d.Name.Lexeme, Methods: make(map[string]*FnType)}
+	for _, m := range d.Methods {
+		params := make([]Type, len(m.Params))
+		for i, p := range m.Params {
+			t, err := c.resolveTypeExprWithSelf(p.Type)
+			if err != nil {
+				return err
+			}
+			params[i] = t
+		}
+		ret, err := c.resolveTypeExprWithSelf(m.RetType)
+		if err != nil {
+			return err
+		}
+		def.Methods[m.Name.Lexeme] = &FnType{Params: params, Ret: ret}
+	}
+	c.traits[d.Name.Lexeme] = def
+	c.traitDecls = append(c.traitDecls, d)
+	return nil
+}
+
+// collectImplForDecl registers an impl-for block: records that the type
+// implements the trait, and registers each method as a regular struct method
+// (same mangling as impl — TypeName_methodName).
+func (c *checker) collectImplForDecl(d *parser.ImplForDecl) error {
+	typeName := d.TypeName.Lexeme
+	traitName := d.TraitName.Lexeme
+	// Verify the trait exists.
+	if _, ok := c.traits[traitName]; !ok {
+		return c.errorf(d.TraitName, "unknown trait %q", traitName)
+	}
+	if c.methods[typeName] == nil {
+		c.methods[typeName] = make(map[string]*FnType)
+	}
+	for _, m := range d.Methods {
+		sig, err := c.buildFnSig(m)
+		if err != nil {
+			return err
+		}
+		mangledName := typeName + "_" + m.Name.Lexeme
+		c.fnSigs[mangledName] = sig
+		c.methods[typeName][m.Name.Lexeme] = sig
+	}
+	// Mark the type as implementing the trait.
+	if c.traitImpls[typeName] == nil {
+		c.traitImpls[typeName] = make(map[string]bool)
+	}
+	c.traitImpls[typeName][traitName] = true
+	c.implForDecls = append(c.implForDecls, d)
+	return nil
+}
+
+// resolveTypeExprWithSelf resolves a type expression, treating "Self" as TSelf.
+func (c *checker) resolveTypeExprWithSelf(te parser.TypeExpr) (Type, error) {
+	if nt, ok := te.(*parser.NamedType); ok && nt.Name.Lexeme == "Self" {
+		return TSelf, nil
+	}
+	return c.resolveTypeExpr(te)
+}
+
+// checkMethodBody type-checks the body of an impl method using its mangled sig.
+func (c *checker) checkMethodBody(mangledName string, d *parser.FnDecl) error {
+	c.beginFnTracking()
+	sig, ok := c.fnSigs[mangledName]
+	if !ok {
+		return fmt.Errorf("internal: method sig %q not found", mangledName)
+	}
+	sc := newScope(nil)
+	for i, p := range d.Params {
+		sc.define(p.Name.Lexeme, sig.Params[i])
+	}
+	prev := c.curEffects
+	c.curEffects = nil
+	err := c.checkBlock(d.Body, sc, sig.Ret)
+	c.flushUnusedWarnings()
+	c.curEffects = prev
+	return err
+}
+
+// tryMethodCall checks if a CallExpr is a method call (Fn is FieldExpr with struct receiver).
+// Returns (returnType, nil) if it is a valid method call, (nil, nil) if not a method call,
+// or (nil, err) if it is a method call but has a type error.
+func (c *checker) tryMethodCall(e *parser.CallExpr, fe *parser.FieldExpr, sc *scope) (Type, error) {
+	// Check receiver type (without recording, so we can check below).
+	recvType, err := c.checkExpr(fe.Receiver, sc, nil)
+	if err != nil {
+		return nil, nil // not a method call if receiver fails
+	}
+	// Dereference ref/refmut
+	baseType := recvType
+	if gen, ok := baseType.(*GenType); ok && (gen.Con == "ref" || gen.Con == "refmut") && len(gen.Params) > 0 {
+		baseType = gen.Params[0]
+	}
+	st, ok := baseType.(*StructType)
+	if !ok {
+		return nil, nil // not a struct, not a method call
+	}
+	methodName := fe.Field.Lexeme
+	methodMap, hasImpl := c.methods[st.Name]
+	if !hasImpl {
+		return nil, nil
+	}
+	sig, hasMethod := methodMap[methodName]
+	if !hasMethod {
+		return nil, nil
+	}
+	// It is a method call. Check arity: sig.Params includes self as first param.
+	if len(e.Args)+1 != len(sig.Params) {
+		return nil, c.errorf(fe.Field, "method %s.%s expects %d argument(s), got %d",
+			st.Name, methodName, len(sig.Params)-1, len(e.Args))
+	}
+	// Check self type matches receiver.
+	if _, ok2 := Coerce(recvType, sig.Params[0]); !ok2 {
+		return nil, c.errorf(fe.Dot, "receiver type %s cannot be used as %s for method %s",
+			recvType, sig.Params[0], methodName)
+	}
+	// Check remaining args.
+	for i, arg := range e.Args {
+		argType, err := c.checkExpr(arg, sc, sig.Params[i+1])
+		if err != nil {
+			return nil, err
+		}
+		coerced, ok2 := Coerce(argType, sig.Params[i+1])
+		if !ok2 {
+			return nil, c.errorf(arg.Pos(), "argument %d: cannot use %s as %s", i+1, argType, sig.Params[i+1])
+		}
+		c.exprTypes[arg] = coerced
+	}
+	// Record the mangled C name for the emitter.
+	mangledName := st.Name + "_" + methodName
+	c.methodCalls[e] = mangledName
+	c.record(e, sig.Ret)
+	return sig.Ret, nil
+}
+
+// inferVecLitExpr type-checks a vec literal [e0, e1, ...].
+func (c *checker) inferVecLitExpr(e *parser.VecLitExpr, sc *scope, hint Type) (Type, error) {
+	// Derive element hint from context if available.
+	var elemHint Type
+	if hint != nil {
+		if gen, ok := hint.(*GenType); ok && gen.Con == "vec" && len(gen.Params) == 1 {
+			elemHint = gen.Params[0]
+		}
+	}
+	if len(e.Elems) == 0 {
+		if elemHint != nil {
+			return &GenType{Con: "vec", Params: []Type{elemHint}}, nil
+		}
+		return nil, c.errorf(e.LBracket, "cannot infer element type of empty vec literal; provide a type annotation")
+	}
+	elemType, err := c.checkExpr(e.Elems[0], sc, elemHint)
+	if err != nil {
+		return nil, err
+	}
+	for _, elem := range e.Elems[1:] {
+		et, err := c.checkExpr(elem, sc, elemType)
+		if err != nil {
+			return nil, err
+		}
+		unified, ok := Unify(elemType, et)
+		if !ok {
+			return nil, c.errorf(elem.Pos(), "vec literal element type mismatch: got %s, expected %s", et, elemType)
+		}
+		elemType = unified
+		c.exprTypes[elem] = elemType
+	}
+	// Resolve sentinel types to defaults.
+	if elemType == TIntLit {
+		elemType = TI64
+	} else if elemType == TFloatLit {
+		elemType = TF64
+	}
+	c.exprTypes[e.Elems[0]] = elemType
+	return &GenType{Con: "vec", Params: []Type{elemType}}, nil
+}
+
+// inferTupleLitExpr type-checks a tuple literal (e0, e1, ...).
+func (c *checker) inferTupleLitExpr(e *parser.TupleLitExpr, sc *scope, hint Type) (Type, error) {
+	elems := make([]Type, len(e.Elems))
+	for i, elem := range e.Elems {
+		var elemHint Type
+		if hint != nil {
+			if tt, ok := hint.(*TupleType); ok && i < len(tt.Elems) {
+				elemHint = tt.Elems[i]
+			}
+		}
+		t, err := c.checkExpr(elem, sc, elemHint)
+		if err != nil {
+			return nil, err
+		}
+		elems[i] = t
+	}
+	return &TupleType{Elems: elems}, nil
+}
+
+// checkTupleDestructureStmt type-checks: let [mut] (a, b, ...) = expr
+func (c *checker) checkTupleDestructureStmt(s *parser.TupleDestructureStmt, sc *scope) error {
+	valType, err := c.checkExpr(s.Value, sc, nil)
+	if err != nil {
+		return err
+	}
+	tt, ok := valType.(*TupleType)
+	if !ok {
+		return c.errorf(s.LetTok, "tuple destructure requires a tuple type, got %s", valType)
+	}
+	if len(s.Names) != len(tt.Elems) {
+		return c.errorf(s.LetTok,
+			"tuple destructure: %d names but tuple has %d elements", len(s.Names), len(tt.Elems))
+	}
+	for i, name := range s.Names {
+		if s.Mut {
+			sc.defineMut(name.Lexeme, tt.Elems[i])
+		} else {
+			sc.define(name.Lexeme, tt.Elems[i])
+		}
+	}
+	return nil
 }

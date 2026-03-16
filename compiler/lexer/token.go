@@ -27,6 +27,7 @@ const (
 	TokMatch
 	TokLoop
 	TokBreak
+	TokContinue
 	TokFor
 	TokStruct
 	TokEnum
@@ -58,6 +59,11 @@ const (
 	TokMut
 	TokSecret
 	TokReveal
+	TokWhile
+	TokConst
+	TokImpl
+	TokAs
+	TokTrait
 
 	// --- Punctuation & Operators ---
 	TokLParen    // (
@@ -81,6 +87,13 @@ const (
 	TokStar    // *
 	TokSlash   // /
 	TokPercent // %
+
+	// Compound assignment
+	TokPlusEq    // +=
+	TokMinusEq   // -=
+	TokStarEq    // *=
+	TokSlashEq   // /=
+	TokPercentEq // %=
 
 	// Assignment & comparison
 	TokEq      // =
@@ -114,6 +127,7 @@ var keywords = map[string]TokenType{
 	"match":     TokMatch,
 	"loop":      TokLoop,
 	"break":     TokBreak,
+	"continue":  TokContinue,
 	"for":       TokFor,
 	"struct":    TokStruct,
 	"enum":      TokEnum,
@@ -145,6 +159,11 @@ var keywords = map[string]TokenType{
 	"mut":    TokMut,
 	"secret": TokSecret,
 	"reveal": TokReveal,
+	"while":  TokWhile,
+	"const":  TokConst,
+	"impl":  TokImpl,
+	"as":    TokAs,
+	"trait": TokTrait,
 }
 
 // Token is a single lexical unit from a .cnd source file.
@@ -174,6 +193,7 @@ var tokenNames = map[TokenType]string{
 	TokMatch:     "match",
 	TokLoop:      "loop",
 	TokBreak:     "break",
+	TokContinue:  "continue",
 	TokFor:       "for",
 	TokStruct:    "struct",
 	TokEnum:      "enum",
@@ -205,6 +225,11 @@ var tokenNames = map[TokenType]string{
 	TokMut:    "mut",
 	TokSecret: "secret",
 	TokReveal: "reveal",
+	TokWhile:  "while",
+	TokConst:  "const",
+	TokImpl:  "impl",
+	TokAs:    "as",
+	TokTrait: "trait",
 	TokLParen:    "(",
 	TokRParen:    ")",
 	TokLBrace:    "{",
@@ -224,6 +249,11 @@ var tokenNames = map[TokenType]string{
 	TokStar:      "*",
 	TokSlash:     "/",
 	TokPercent:   "%",
+	TokPlusEq:    "+=",
+	TokMinusEq:   "-=",
+	TokStarEq:    "*=",
+	TokSlashEq:   "/=",
+	TokPercentEq: "%=",
 	TokEq:        "=",
 	TokEqEq:      "==",
 	TokBangEq:    "!=",

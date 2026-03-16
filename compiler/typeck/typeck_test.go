@@ -1499,3 +1499,90 @@ func TestForKVInMapKeyValTypes(t *testing.T) {
 		return unit
 	}`, "cannot use")
 }
+
+// ── M4.1 Diagnostic Quality Tests ────────────────────────────────────────────
+
+func TestUnusedVariableWarning(t *testing.T) {
+	res := mustCompile(t, `fn f() -> unit {
+		let x = 42
+		return unit
+	}`)
+	if len(res.Warnings) == 0 {
+		t.Fatal("expected unused-variable warning, got none")
+	}
+	found := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w.Msg, "unused") && strings.Contains(w.Msg, "x") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected warning about unused 'x', got: %v", res.Warnings)
+	}
+}
+
+func TestUnusedVariableNoWarnWhenUsed(t *testing.T) {
+	res := mustCompile(t, `fn f() -> i64 {
+		let x = 42
+		return x
+	}`)
+	for _, w := range res.Warnings {
+		if strings.Contains(w.Msg, "unused") {
+			t.Errorf("unexpected unused-variable warning: %v", w.Msg)
+		}
+	}
+}
+
+func TestUnusedVariableUnderscoreNoWarn(t *testing.T) {
+	res := mustCompile(t, `fn f() -> unit {
+		let _ignored = 42
+		return unit
+	}`)
+	for _, w := range res.Warnings {
+		if strings.Contains(w.Msg, "unused") {
+			t.Errorf("unexpected warning for _-prefixed variable: %v", w.Msg)
+		}
+	}
+}
+
+func TestShadowWarning(t *testing.T) {
+	res := mustCompile(t, `fn f() -> i64 {
+		let x = 1
+		let x = 2
+		return x
+	}`)
+	found := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w.Msg, "shadows") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected shadow warning, got: %v", res.Warnings)
+	}
+}
+
+func TestDidYouMeanHint(t *testing.T) {
+	_, err := compile(`fn f() -> unit {
+		pint("hello")
+	}`)
+	if err == nil {
+		t.Fatal("expected error for undefined 'pint'")
+	}
+	if !strings.Contains(err.Error(), "print") {
+		t.Errorf("expected 'did you mean print' hint in error: %v", err)
+	}
+}
+
+func TestErrorHintField(t *testing.T) {
+	_, err := compile(`fn f() -> unit {
+		fooBarBaz()
+	}`)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	// fooBarBaz has no close match — hint should be empty, error still valid
+	if !strings.Contains(err.Error(), "undefined") {
+		t.Errorf("expected 'undefined' in error: %v", err)
+	}
+}

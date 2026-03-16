@@ -109,25 +109,37 @@ func (p *parser) errorf(t lexer.Token, format string, args ...any) error {
 
 func (p *parser) parseFile(name string) (*File, error) {
 	file := &File{Name: name}
+	var pendingDirectives []string
 	for !p.check(lexer.TokEOF) {
-		// Skip file-scope directives (#use effects, #intent "...", etc.)
-		// Consume the directive word and then any tokens that follow on the
-		// same logical "directive line" — i.e. until we hit something that
-		// starts a new declaration, another directive, or EOF.
+		// Collect file-scope directives immediately before a declaration.
+		// #test, #use, #intent, etc. — the word after # is a TokDirective.
 		if p.check(lexer.TokDirective) {
+			word := p.peek().Lexeme
 			p.advance()
+			// Consume any extra tokens on the directive line that aren't a
+			// declaration start, another directive, or EOF.
 			for !p.check(lexer.TokEOF) &&
 				!p.check(lexer.TokDirective) &&
 				!p.check(lexer.TokFn) &&
 				!p.check(lexer.TokStruct) &&
-				!p.check(lexer.TokEnum) {
+				!p.check(lexer.TokEnum) &&
+				!p.check(lexer.TokImpl) &&
+				!p.check(lexer.TokTrait) {
 				p.advance()
 			}
+			pendingDirectives = append(pendingDirectives, word)
 			continue
 		}
 		decl, err := p.parseDecl()
 		if err != nil {
 			return file, err
+		}
+		// Attach collected directives to the function declaration.
+		if len(pendingDirectives) > 0 {
+			if fn, ok := decl.(*FnDecl); ok {
+				fn.Directives = append(fn.Directives, pendingDirectives...)
+			}
+			pendingDirectives = nil
 		}
 		file.Decls = append(file.Decls, decl)
 	}
@@ -150,9 +162,15 @@ func (p *parser) parseDecl() (Decl, error) {
 		return p.parseUseDecl()
 	case lexer.TokExtern:
 		return p.parseExternFnDecl()
+	case lexer.TokConst:
+		return p.parseConstDecl()
+	case lexer.TokImpl:
+		return p.parseImplDecl()
+	case lexer.TokTrait:
+		return p.parseTraitDecl()
 	default:
 		t := p.peek()
-		return nil, p.errorf(t, "expected declaration (fn, struct, module, or use), got %v %q", t.Type, t.Lexeme)
+		return nil, p.errorf(t, "expected declaration (fn, struct, enum, module, use, extern, const, impl, or trait), got %v %q", t.Type, t.Lexeme)
 	}
 }
 
@@ -246,6 +264,13 @@ func (p *parser) parseFnDecl() (*FnDecl, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	// Optional type parameter list: <T, U: Trait, ...>
+	typeParams, typeBounds, err := p.parseTypeParamsWithBounds()
+	if err != nil {
+		return nil, err
+	}
+
 	if _, err := p.expect(lexer.TokLParen); err != nil {
 		return nil, err
 	}
@@ -276,13 +301,15 @@ func (p *parser) parseFnDecl() (*FnDecl, error) {
 		return nil, err
 	}
 	return &FnDecl{
-		FnTok:     fnTok,
-		Name:      nameTok,
-		Params:    params,
-		RetType:   retType,
-		Effects:   effects,
-		Contracts: contracts,
-		Body:      body,
+		FnTok:      fnTok,
+		Name:       nameTok,
+		TypeParams: typeParams,
+		TypeBounds: typeBounds,
+		Params:     params,
+		RetType:    retType,
+		Effects:    effects,
+		Contracts:  contracts,
+		Body:       body,
 	}, nil
 }
 
@@ -520,6 +547,10 @@ func (p *parser) parseStmt() (Stmt, error) {
 		return p.parseForStmt()
 	case lexer.TokBreak:
 		return &BreakStmt{BreakTok: p.advance()}, nil
+	case lexer.TokContinue:
+		return &ContinueStmt{ContinueTok: p.advance()}, nil
+	case lexer.TokWhile:
+		return p.parseWhileStmt()
 	case lexer.TokAssert:
 		assertTok := p.advance()
 		expr, err := p.parseExpr()
@@ -532,12 +563,44 @@ func (p *parser) parseStmt() (Stmt, error) {
 	}
 }
 
-func (p *parser) parseLetStmt() (*LetStmt, error) {
+func (p *parser) parseLetStmt() (Stmt, error) {
 	letTok := p.advance() // consume 'let'
 	mut := false
 	if p.check(lexer.TokMut) {
 		p.advance()
 		mut = true
+	}
+
+	// Tuple destructuring: let (a, b, ...) = expr
+	if p.check(lexer.TokLParen) {
+		p.advance() // consume '('
+		var names []lexer.Token
+		for !p.check(lexer.TokRParen) && !p.check(lexer.TokEOF) {
+			if len(names) > 0 {
+				if _, err := p.expect(lexer.TokComma); err != nil {
+					return nil, err
+				}
+				if p.check(lexer.TokRParen) {
+					break
+				}
+			}
+			name, err := p.expect(lexer.TokIdent)
+			if err != nil {
+				return nil, err
+			}
+			names = append(names, name)
+		}
+		if _, err := p.expect(lexer.TokRParen); err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.TokEq); err != nil {
+			return nil, err
+		}
+		value, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		return &TupleDestructureStmt{LetTok: letTok, Mut: mut, Names: names, Value: value}, nil
 	}
 
 	nameTok, err := p.expect(lexer.TokIdent)
@@ -578,13 +641,61 @@ func (p *parser) parseAssignStmt() (*AssignStmt, error) {
 	return &AssignStmt{Name: name, Eq: eq, Value: value}, nil
 }
 
-// parseExprOrAssignStmt parses an expression and, if followed by '=',
-// turns it into an assignment statement (variable or field).
+// compoundOpFor maps a compound-assignment token to its binary arithmetic token.
+func compoundOpFor(t lexer.TokenType) (lexer.TokenType, bool) {
+	switch t {
+	case lexer.TokPlusEq:
+		return lexer.TokPlus, true
+	case lexer.TokMinusEq:
+		return lexer.TokMinus, true
+	case lexer.TokStarEq:
+		return lexer.TokStar, true
+	case lexer.TokSlashEq:
+		return lexer.TokSlash, true
+	case lexer.TokPercentEq:
+		return lexer.TokPercent, true
+	}
+	return 0, false
+}
+
+// parseExprOrAssignStmt parses an expression and, if followed by '=' or a
+// compound-assignment operator (+=, -=, *=, /=, %=), turns it into an
+// assignment statement.  Compound assignments are desugared:
+//
+//	x += y  →  AssignStmt{ Name: x, Value: BinaryExpr{ x, +, y } }
 func (p *parser) parseExprOrAssignStmt() (Stmt, error) {
 	expr, err := p.parseExpr()
 	if err != nil {
 		return nil, err
 	}
+
+	// Check for compound assignment operators.
+	if binOp, ok := compoundOpFor(p.peekType()); ok {
+		opTok := p.advance() // consume += / -= / ...
+		rhs, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		// Synthetic binary op token: same position as the compound-op token,
+		// but with the simple arithmetic type.
+		arithTok := opTok
+		arithTok.Type = binOp
+		arithTok.Lexeme = lexer.TokenType(binOp).String()
+		switch t := expr.(type) {
+		case *IdentExpr:
+			value := &BinaryExpr{Left: &IdentExpr{Tok: t.Tok}, Op: arithTok, Right: rhs}
+			return &AssignStmt{Name: t.Tok, Eq: opTok, Value: value}, nil
+		case *FieldExpr:
+			value := &BinaryExpr{Left: t, Op: arithTok, Right: rhs}
+			return &FieldAssignStmt{Target: t, Eq: opTok, Value: value}, nil
+		case *IndexExpr:
+			value := &BinaryExpr{Left: t, Op: arithTok, Right: rhs}
+			return &IndexAssignStmt{Target: t, Eq: opTok, Value: value}, nil
+		default:
+			return nil, p.errorf(opTok, "invalid compound-assignment target")
+		}
+	}
+
 	if !p.check(lexer.TokEq) {
 		return &ExprStmt{X: expr}, nil
 	}
@@ -809,11 +920,25 @@ func (p *parser) parsePostfixExpr() (Expr, error) {
 
 		case lexer.TokDot:
 			dot := p.advance()
+			// Tuple index: .0 .1 .2 ...
+			if p.check(lexer.TokInt) {
+				idx := p.advance()
+				expr = &FieldExpr{Receiver: expr, Dot: dot, Field: idx}
+				continue
+			}
 			field, err := p.expect(lexer.TokIdent)
 			if err != nil {
 				return nil, err
 			}
 			expr = &FieldExpr{Receiver: expr, Dot: dot, Field: field}
+
+		case lexer.TokAs:
+			asTok := p.advance()
+			target, err := p.parseType()
+			if err != nil {
+				return nil, err
+			}
+			expr = &CastExpr{X: expr, AsTok: asTok, Target: target}
 
 		case lexer.TokLBracket:
 			lb := p.advance()
@@ -845,14 +970,14 @@ func (p *parser) parsePostfixExpr() (Expr, error) {
 			ident, isIdent := expr.(*IdentExpr)
 			if isIdent && len(ident.Tok.Lexeme) > 0 && ident.Tok.Lexeme[0] >= 'A' && ident.Tok.Lexeme[0] <= 'Z' {
 				p.advance() // consume '{'
-				fields, err := p.parseFieldInits()
+				fields, base, err := p.parseFieldInits()
 				if err != nil {
 					return nil, err
 				}
 				if _, err := p.expect(lexer.TokRBrace); err != nil {
 					return nil, err
 				}
-				expr = &StructLitExpr{TypeName: ident.Tok, Fields: fields}
+				expr = &StructLitExpr{TypeName: ident.Tok, Base: base, Fields: fields}
 				continue
 			}
 			return expr, nil
@@ -883,32 +1008,48 @@ func (p *parser) parseArgs() ([]Expr, error) {
 	return args, nil
 }
 
-func (p *parser) parseFieldInits() ([]FieldInit, error) {
+// parseFieldInits parses the body of a struct literal.
+// Returns (fields, base, error) where base is non-nil when a ..expr spread is present.
+func (p *parser) parseFieldInits() ([]FieldInit, Expr, error) {
 	var fields []FieldInit
+	var base Expr
+	needComma := false
 	for !p.check(lexer.TokRBrace) && !p.check(lexer.TokEOF) {
-		if len(fields) > 0 {
+		if needComma {
 			if _, err := p.expect(lexer.TokComma); err != nil {
-				return nil, err
+				return nil, nil, err
 			}
 		}
 		if p.check(lexer.TokRBrace) {
 			break // trailing comma
 		}
+		// Spread: ..expr
+		if p.check(lexer.TokDotDot) {
+			p.advance() // consume '..'
+			spreadExpr, err := p.parseExpr()
+			if err != nil {
+				return nil, nil, err
+			}
+			base = spreadExpr
+			needComma = true
+			continue
+		}
 		name, err := p.expect(lexer.TokIdent)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		colon, err := p.expect(lexer.TokColon)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		value, err := p.parseExpr()
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		fields = append(fields, FieldInit{Name: name, Colon: colon, Value: value})
+		needComma = true
 	}
-	return fields, nil
+	return fields, base, nil
 }
 
 func (p *parser) parseMustArms() ([]MustArm, error) {
@@ -1038,15 +1179,59 @@ func (p *parser) parsePrimaryExpr() (Expr, error) {
 	case lexer.TokMatch:
 		return p.parseMatchExpr()
 	case lexer.TokLParen:
-		p.advance()
-		expr, err := p.parseExpr()
+		lp := p.advance()
+		first, err := p.parseExpr()
 		if err != nil {
 			return nil, err
+		}
+		// Tuple literal if followed by ','
+		if p.check(lexer.TokComma) {
+			elems := []Expr{first}
+			for p.check(lexer.TokComma) {
+				p.advance()
+				if p.check(lexer.TokRParen) {
+					break
+				}
+				e, err := p.parseExpr()
+				if err != nil {
+					return nil, err
+				}
+				elems = append(elems, e)
+			}
+			if _, err := p.expect(lexer.TokRParen); err != nil {
+				return nil, err
+			}
+			return &TupleLitExpr{LParen: lp, Elems: elems}, nil
 		}
 		if _, err := p.expect(lexer.TokRParen); err != nil {
 			return nil, err
 		}
-		return expr, nil
+		return first, nil
+
+	case lexer.TokLBracket:
+		// Vec literal: [expr, expr, ...]
+		lb := p.advance()
+		var elems []Expr
+		for !p.check(lexer.TokRBracket) && !p.check(lexer.TokEOF) {
+			if len(elems) > 0 {
+				if _, err := p.expect(lexer.TokComma); err != nil {
+					return nil, err
+				}
+				if p.check(lexer.TokRBracket) {
+					break
+				}
+			}
+			e, err := p.parseExpr()
+			if err != nil {
+				return nil, err
+			}
+			elems = append(elems, e)
+		}
+		rb, err := p.expect(lexer.TokRBracket)
+		if err != nil {
+			return nil, err
+		}
+		return &VecLitExpr{LBracket: lb, Elems: elems, RBracket: rb}, nil
 	case lexer.TokAmp:
 		// Reference: &expr
 		amp := p.advance()
@@ -1063,9 +1248,50 @@ func (p *parser) parsePrimaryExpr() (Expr, error) {
 			return nil, err
 		}
 		return &UnaryExpr{Op: star, Operand: operand}, nil
+	case lexer.TokFn:
+		return p.parseLambdaExpr()
+	case lexer.TokOld:
+		oldTok := p.advance()
+		if _, err := p.expect(lexer.TokLParen); err != nil {
+			return nil, err
+		}
+		inner, err := p.parseExpr()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.TokRParen); err != nil {
+			return nil, err
+		}
+		return &OldExpr{OldTok: oldTok, X: inner}, nil
 	default:
 		return nil, p.errorf(t, "expected expression, got %v %q", t.Type, t.Lexeme)
 	}
+}
+
+func (p *parser) parseLambdaExpr() (*LambdaExpr, error) {
+	fnTok := p.advance() // consume 'fn'
+	if _, err := p.expect(lexer.TokLParen); err != nil {
+		return nil, err
+	}
+	params, err := p.parseParams()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.TokRParen); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.TokArrow); err != nil {
+		return nil, err
+	}
+	retType, err := p.parseType()
+	if err != nil {
+		return nil, err
+	}
+	body, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	return &LambdaExpr{FnTok: fnTok, Params: params, RetType: retType, Body: body}, nil
 }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
@@ -1082,6 +1308,36 @@ func (p *parser) parseType() (TypeExpr, error) {
 		return &NamedType{Name: name}, nil
 	case lexer.TokFn:
 		return p.parseFnType()
+	case lexer.TokLParen:
+		// Tuple type: (T, U, ...) — must have 2+ elements.
+		lp := p.advance()
+		first, err := p.parseType()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.TokComma); err != nil {
+			return nil, err
+		}
+		elems := []TypeExpr{first}
+		for !p.check(lexer.TokRParen) && !p.check(lexer.TokEOF) {
+			if len(elems) > 1 {
+				if _, err := p.expect(lexer.TokComma); err != nil {
+					return nil, err
+				}
+				if p.check(lexer.TokRParen) {
+					break
+				}
+			}
+			te, err := p.parseType()
+			if err != nil {
+				return nil, err
+			}
+			elems = append(elems, te)
+		}
+		if _, err := p.expect(lexer.TokRParen); err != nil {
+			return nil, err
+		}
+		return &TupleTypeExpr{LParen: lp, Elems: elems}, nil
 	default:
 		return nil, p.errorf(t, "expected type, got %v %q", t.Type, t.Lexeme)
 	}
@@ -1143,4 +1399,222 @@ func (p *parser) parseFnType() (*FnType, error) {
 		return nil, err
 	}
 	return &FnType{FnTok: fnTok, Params: params, RetType: retType}, nil
+}
+
+// ── New declaration parsers ───────────────────────────────────────────────────
+
+func (p *parser) parseWhileStmt() (*WhileStmt, error) {
+	whileTok := p.advance() // consume 'while'
+	cond, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	body, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	return &WhileStmt{WhileTok: whileTok, Cond: cond, Body: body}, nil
+}
+
+func (p *parser) parseConstDecl() (*ConstDecl, error) {
+	constTok := p.advance() // consume 'const'
+	name, err := p.expect(lexer.TokIdent)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.TokColon); err != nil {
+		return nil, err
+	}
+	typ, err := p.parseType()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.TokEq); err != nil {
+		return nil, err
+	}
+	value, err := p.parseExpr()
+	if err != nil {
+		return nil, err
+	}
+	return &ConstDecl{ConstTok: constTok, Name: name, Type: typ, Value: value}, nil
+}
+
+// parseTypeParamsWithBounds parses an optional <T, U: Trait, V: A+B> list.
+// Returns the param name tokens and a map of name→trait-bound names.
+func (p *parser) parseTypeParamsWithBounds() ([]lexer.Token, map[string][]string, error) {
+	if !p.check(lexer.TokLt) {
+		return nil, nil, nil
+	}
+	p.advance() // consume '<'
+	var typeParams []lexer.Token
+	bounds := make(map[string][]string)
+	for {
+		tp, err := p.expect(lexer.TokIdent)
+		if err != nil {
+			return nil, nil, err
+		}
+		typeParams = append(typeParams, tp)
+		// Optional : TraitName (+ TraitName)*
+		if p.check(lexer.TokColon) {
+			p.advance()
+			for {
+				traitTok, err := p.expect(lexer.TokIdent)
+				if err != nil {
+					return nil, nil, err
+				}
+				bounds[tp.Lexeme] = append(bounds[tp.Lexeme], traitTok.Lexeme)
+				if p.check(lexer.TokPlus) {
+					p.advance()
+					continue
+				}
+				break
+			}
+		}
+		if p.check(lexer.TokComma) {
+			p.advance()
+			continue
+		}
+		break
+	}
+	if _, err := p.expect(lexer.TokGt); err != nil {
+		return nil, nil, err
+	}
+	if len(bounds) == 0 {
+		bounds = nil
+	}
+	return typeParams, bounds, nil
+}
+
+// parseImplMethod parses a single method inside an impl or impl-for block.
+func (p *parser) parseImplMethod() (*FnDecl, error) {
+	if _, err := p.expect(lexer.TokFn); err != nil {
+		return nil, err
+	}
+	nameTok, err := p.expect(lexer.TokIdent)
+	if err != nil {
+		return nil, err
+	}
+	typeParams, typeBounds, err := p.parseTypeParamsWithBounds()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.TokLParen); err != nil {
+		return nil, err
+	}
+	params, err := p.parseParams()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.TokRParen); err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.TokArrow); err != nil {
+		return nil, err
+	}
+	retType, err := p.parseType()
+	if err != nil {
+		return nil, err
+	}
+	body, err := p.parseBlock()
+	if err != nil {
+		return nil, err
+	}
+	return &FnDecl{
+		Name:       nameTok,
+		TypeParams: typeParams,
+		TypeBounds: typeBounds,
+		Params:     params,
+		RetType:    retType,
+		Body:       body,
+	}, nil
+}
+
+func (p *parser) parseImplDecl() (Decl, error) {
+	implTok := p.advance() // consume 'impl'
+	firstName, err := p.expect(lexer.TokIdent)
+	if err != nil {
+		return nil, err
+	}
+	// Distinguish: impl TraitName for TypeName  vs  impl TypeName { ... }
+	if p.check(lexer.TokFor) {
+		p.advance() // consume 'for'
+		typeName, err := p.expect(lexer.TokIdent)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.TokLBrace); err != nil {
+			return nil, err
+		}
+		var methods []*FnDecl
+		for !p.check(lexer.TokRBrace) && !p.check(lexer.TokEOF) {
+			m, err := p.parseImplMethod()
+			if err != nil {
+				return nil, err
+			}
+			methods = append(methods, m)
+		}
+		if _, err := p.expect(lexer.TokRBrace); err != nil {
+			return nil, err
+		}
+		return &ImplForDecl{ImplTok: implTok, TraitName: firstName, TypeName: typeName, Methods: methods}, nil
+	}
+	// Regular impl TypeName { ... }
+	if _, err := p.expect(lexer.TokLBrace); err != nil {
+		return nil, err
+	}
+	var methods []*FnDecl
+	for !p.check(lexer.TokRBrace) && !p.check(lexer.TokEOF) {
+		m, err := p.parseImplMethod()
+		if err != nil {
+			return nil, err
+		}
+		methods = append(methods, m)
+	}
+	if _, err := p.expect(lexer.TokRBrace); err != nil {
+		return nil, err
+	}
+	return &ImplDecl{ImplTok: implTok, TypeName: firstName, Methods: methods}, nil
+}
+
+func (p *parser) parseTraitDecl() (*TraitDecl, error) {
+	traitTok := p.advance() // consume 'trait'
+	name, err := p.expect(lexer.TokIdent)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := p.expect(lexer.TokLBrace); err != nil {
+		return nil, err
+	}
+	var methods []*TraitMethod
+	for !p.check(lexer.TokRBrace) && !p.check(lexer.TokEOF) {
+		if _, err := p.expect(lexer.TokFn); err != nil {
+			return nil, err
+		}
+		mName, err := p.expect(lexer.TokIdent)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.TokLParen); err != nil {
+			return nil, err
+		}
+		params, err := p.parseParams()
+		if err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.TokRParen); err != nil {
+			return nil, err
+		}
+		if _, err := p.expect(lexer.TokArrow); err != nil {
+			return nil, err
+		}
+		retType, err := p.parseType()
+		if err != nil {
+			return nil, err
+		}
+		methods = append(methods, &TraitMethod{Name: mName, Params: params, RetType: retType})
+	}
+	if _, err := p.expect(lexer.TokRBrace); err != nil {
+		return nil, err
+	}
+	return &TraitDecl{TraitTok: traitTok, Name: name, Methods: methods}, nil
 }

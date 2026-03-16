@@ -48,15 +48,18 @@ type UseDecl struct {
 func (d *UseDecl) Pos() lexer.Token { return d.UseTok }
 func (d *UseDecl) declNode()        {}
 
-// FnDecl: fn name(params) -> RetType [pure | effects(...) | cap(...)] { body }
+// FnDecl: fn name[<T, U>](params) -> RetType [pure | effects(...) | cap(...)] { body }
 type FnDecl struct {
-	FnTok     lexer.Token
-	Name      lexer.Token
-	Params    []Param
-	RetType   TypeExpr
-	Effects   *EffectsAnnotation // nil = no annotation (unchecked)
-	Contracts []ContractClause   // requires/ensures; nil or empty = none
-	Body      *BlockStmt
+	FnTok      lexer.Token
+	Name       lexer.Token
+	TypeParams []lexer.Token       // non-nil when generic: fn foo<T, U>(...)
+	TypeBounds map[string][]string // type param name → required trait names, e.g. {"T": ["Display"]}
+	Params     []Param
+	RetType    TypeExpr
+	Effects    *EffectsAnnotation // nil = no annotation (unchecked)
+	Contracts  []ContractClause   // requires/ensures; nil or empty = none
+	Body       *BlockStmt
+	Directives []string // directive words immediately preceding this fn, e.g. ["test"]
 }
 
 func (d *FnDecl) Pos() lexer.Token { return d.FnTok }
@@ -109,6 +112,60 @@ type ExternFnDecl struct {
 
 func (d *ExternFnDecl) Pos() lexer.Token { return d.ExternTok }
 func (d *ExternFnDecl) declNode()        {}
+
+// ConstDecl: const NAME: Type = expr
+// Module-level compile-time constant.
+type ConstDecl struct {
+	ConstTok lexer.Token
+	Name     lexer.Token
+	Type     TypeExpr
+	Value    Expr
+}
+
+func (d *ConstDecl) Pos() lexer.Token { return d.ConstTok }
+func (d *ConstDecl) declNode()        {}
+
+// ImplDecl: impl StructName { fn method(...) -> R { body } ... }
+// Associates methods with a named struct type.
+type ImplDecl struct {
+	ImplTok  lexer.Token
+	TypeName lexer.Token
+	Methods  []*FnDecl
+}
+
+func (d *ImplDecl) Pos() lexer.Token { return d.ImplTok }
+func (d *ImplDecl) declNode()        {}
+
+// TraitDecl: trait Name { fn method(self: ref<Self>, ...) -> RetType }
+// Declares an interface that types can implement.
+type TraitDecl struct {
+	TraitTok lexer.Token
+	Name     lexer.Token
+	Methods  []*TraitMethod
+}
+
+func (d *TraitDecl) Pos() lexer.Token { return d.TraitTok }
+func (d *TraitDecl) declNode()        {}
+
+// TraitMethod is a method signature in a trait declaration (no body).
+type TraitMethod struct {
+	Name    lexer.Token
+	Params  []Param
+	RetType TypeExpr
+}
+
+// ImplForDecl: impl TraitName for TypeName { fn method(...) -> R { body } }
+// Implements a trait for a concrete type.
+type ImplForDecl struct {
+	ImplTok   lexer.Token
+	TraitName lexer.Token
+	TypeName  lexer.Token
+	Methods   []*FnDecl
+}
+
+func (d *ImplForDecl) Pos() lexer.Token { return d.ImplTok }
+func (d *ImplForDecl) declNode()        {}
+
 type EnumVariant struct {
 	Name   lexer.Token
 	Fields []TypeExpr // empty for unit variants
@@ -187,6 +244,24 @@ type BreakStmt struct {
 func (s *BreakStmt) Pos() lexer.Token { return s.BreakTok }
 func (s *BreakStmt) stmtNode()        {}
 
+// ContinueStmt: continue
+type ContinueStmt struct {
+	ContinueTok lexer.Token
+}
+
+func (s *ContinueStmt) Pos() lexer.Token { return s.ContinueTok }
+func (s *ContinueStmt) stmtNode()        {}
+
+// WhileStmt: while cond { body }
+type WhileStmt struct {
+	WhileTok lexer.Token
+	Cond     Expr
+	Body     *BlockStmt
+}
+
+func (s *WhileStmt) Pos() lexer.Token { return s.WhileTok }
+func (s *WhileStmt) stmtNode()        {}
+
 // ForStmt: for name in collection { body }
 //          for key, val in map    { body }  (map iteration)
 // Collection must be vec<T>, ring<T>, or map<K,V>; names are bound to element types.
@@ -201,6 +276,18 @@ type ForStmt struct {
 
 func (s *ForStmt) Pos() lexer.Token { return s.ForTok }
 func (s *ForStmt) stmtNode()        {}
+
+// TupleDestructureStmt: let [mut] (a, b, ...) = expr
+// Binds each tuple element to a separate variable.
+type TupleDestructureStmt struct {
+	LetTok lexer.Token
+	Mut    bool
+	Names  []lexer.Token // bound variable names, in order
+	Value  Expr
+}
+
+func (s *TupleDestructureStmt) Pos() lexer.Token { return s.LetTok }
+func (s *TupleDestructureStmt) stmtNode()        {}
 
 // AssignStmt: name = value  (requires mutable binding)
 type AssignStmt struct {
@@ -384,8 +471,11 @@ func (e *PathExpr) Pos() lexer.Token { return e.Head }
 func (e *PathExpr) exprNode()        {}
 
 // StructLitExpr: TypeName { field: value, ... }
+// When Base is non-nil, this is a struct update expression: TypeName { ..base, field: val, ... }
+// Fields not listed in Fields are copied from Base.
 type StructLitExpr struct {
 	TypeName lexer.Token
+	Base     Expr       // non-nil for struct update: ..base
 	Fields   []FieldInit
 }
 
@@ -398,6 +488,57 @@ type FieldInit struct {
 	Colon lexer.Token
 	Value Expr
 }
+
+// LambdaExpr: fn(params) -> RetType { body }
+// An anonymous function literal in expression position.
+type LambdaExpr struct {
+	FnTok   lexer.Token
+	Params  []Param
+	RetType TypeExpr
+	Body    *BlockStmt
+}
+
+func (e *LambdaExpr) Pos() lexer.Token { return e.FnTok }
+func (e *LambdaExpr) exprNode()        {}
+
+// CastExpr: expr as Type — explicit numeric cast.
+type CastExpr struct {
+	X      Expr
+	AsTok  lexer.Token
+	Target TypeExpr
+}
+
+func (e *CastExpr) Pos() lexer.Token { return e.X.Pos() }
+func (e *CastExpr) exprNode()        {}
+
+// VecLitExpr: [expr, expr, ...] — vec literal.
+type VecLitExpr struct {
+	LBracket lexer.Token
+	Elems    []Expr
+	RBracket lexer.Token
+}
+
+func (e *VecLitExpr) Pos() lexer.Token { return e.LBracket }
+func (e *VecLitExpr) exprNode()        {}
+
+// TupleLitExpr: (expr, expr, ...) — tuple literal (2+ elements).
+type TupleLitExpr struct {
+	LParen lexer.Token
+	Elems  []Expr
+}
+
+func (e *TupleLitExpr) Pos() lexer.Token { return e.LParen }
+func (e *TupleLitExpr) exprNode()        {}
+
+// OldExpr: old(expr) — valid only in ensures clauses.
+// Evaluates expr using the parameter values at function entry.
+type OldExpr struct {
+	OldTok lexer.Token
+	X      Expr
+}
+
+func (e *OldExpr) Pos() lexer.Token { return e.OldTok }
+func (e *OldExpr) exprNode()        {}
 
 // AssertStmt: assert expr  — runtime precondition check inside a function body.
 type AssertStmt struct {
@@ -466,6 +607,15 @@ type GenericType struct {
 
 func (t *GenericType) Pos() lexer.Token { return t.Name }
 func (t *GenericType) typeNode()        {}
+
+// TupleTypeExpr: (T, U, V) — tuple type with 2+ elements.
+type TupleTypeExpr struct {
+	LParen lexer.Token
+	Elems  []TypeExpr
+}
+
+func (t *TupleTypeExpr) Pos() lexer.Token { return t.LParen }
+func (t *TupleTypeExpr) typeNode()        {}
 
 // FnType: fn(T, U) -> V
 type FnType struct {

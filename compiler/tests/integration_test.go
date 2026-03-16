@@ -703,7 +703,7 @@ fn main() -> unit {
 	checks := []string{
 		"#include <stdint.h>",
 		"uint32_t add(",
-		"int main(void)",
+		"int main(int argc, char** argv)",
 		"return 0;",
 	}
 	for _, want := range checks {
@@ -1710,5 +1710,386 @@ fn main() -> unit {
 	got := strings.ReplaceAll(string(out), "\r\n", "\n")
 	if got != "hello\n42\n" {
 		t.Fatalf("got %q, want %q", got, "hello\n42\n")
+	}
+}
+
+// ── Feature: set<T> ──────────────────────────────────────────────────────────
+
+func TestSetBasic(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+	let mut s: set<i64> = set_new()
+	set_add(s, 1)
+	set_add(s, 2)
+	set_add(s, 3)
+	set_add(s, 2)
+	print_bool(set_len(s) == 3)
+	if set_contains(s, 2) {
+		print("yes")
+	}
+	if set_contains(s, 99) {
+		print("no")
+	}
+	set_remove(s, 2)
+	if set_contains(s, 2) {
+		print("bad")
+	}
+	print_bool(set_len(s) == 2)
+	return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "set_basic", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "true\nyes\ntrue\n" {
+		t.Fatalf("got %q, want %q", got, "true\nyes\ntrue\n")
+	}
+}
+
+func TestSetForIteration(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+	let mut s: set<i64> = set_new()
+	set_add(s, 10)
+	set_add(s, 20)
+	set_add(s, 30)
+	let mut sum: i64 = 0
+	for x in s {
+		sum = sum + x
+	}
+	print_int(sum)
+	return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "set_for", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "60\n" {
+		t.Fatalf("got %q, want %q", got, "60\n")
+	}
+}
+
+func TestSetStrKeys(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+	let mut s: set<str> = set_new()
+	set_add(s, "apple")
+	set_add(s, "banana")
+	set_add(s, "apple")
+	print_bool(set_len(s) == 2)
+	if set_contains(s, "banana") {
+		print("found")
+	}
+	return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "set_str", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "true\nfound\n" {
+		t.Fatalf("got %q, want %q", got, "true\nfound\n")
+	}
+}
+
+// ── Feature: lambdas ─────────────────────────────────────────────────────────
+
+func TestLambdaBasic(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+	let f: fn(i64) -> i64 = fn(x: i64) -> i64 { return x + 1 }
+	print_int(f(10))
+	return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "lambda_basic", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "11\n" {
+		t.Fatalf("got %q, want %q", got, "11\n")
+	}
+}
+
+func TestLambdaHigherOrder(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn apply(f: fn(i64) -> i64, x: i64) -> i64 { return f(x) }
+fn main() -> unit {
+	let result: i64 = apply(fn(n: i64) -> i64 { return n * 2 }, 7)
+	print_int(result)
+	return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "lambda_ho", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "14\n" {
+		t.Fatalf("got %q, want %q", got, "14\n")
+	}
+}
+
+func TestLambdaInLoop(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+	let double: fn(i64) -> i64 = fn(x: i64) -> i64 { return x * 2 }
+	let mut v: vec<i64> = vec_new()
+	vec_push(v, 1)
+	vec_push(v, 2)
+	vec_push(v, 3)
+	for x in v {
+		print_int(double(x))
+	}
+	return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "lambda_loop", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "2\n4\n6\n" {
+		t.Fatalf("got %q, want %q", got, "2\n4\n6\n")
+	}
+}
+
+// ── Feature: old() in contracts ──────────────────────────────────────────────
+
+func TestOldIncrement(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn increment(x: i64) -> i64
+    ensures result == old(x) + 1
+{
+    return x + 1
+}
+fn main() -> unit {
+    print_int(increment(5))
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "old_incr", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "6\n" {
+		t.Fatalf("got %q, want %q", got, "6\n")
+	}
+}
+
+func TestOldWithResult(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn add(x: i64, y: i64) -> i64
+    ensures result == old(x) + old(y)
+{
+    return x + y
+}
+fn main() -> unit {
+    print_int(add(3, 4))
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "old_add", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "7\n" {
+		t.Fatalf("got %q, want %q", got, "7\n")
+	}
+}
+
+// ── New feature tests (features 1-8) ─────────────────────────────────────────
+
+// TestWhileLoop verifies the while loop construct.
+func TestWhileLoop(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+    let mut i: i64 = 0
+    while i < 5 {
+        i = i + 1
+    }
+    print_int(i)
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "while_loop", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "5\n" {
+		t.Fatalf("got %q, want %q", got, "5\n")
+	}
+}
+
+// TestConstDecl verifies module-level const declarations.
+func TestConstDecl(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+const ANSWER: i64 = 42
+
+fn main() -> unit {
+    print_int(ANSWER)
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "const_decl", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "42\n" {
+		t.Fatalf("got %q, want %q", got, "42\n")
+	}
+}
+
+// TestCastOperator verifies the `as` explicit cast operator.
+func TestCastOperator(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+    let x: i32 = 7
+    let y: i64 = x as i64
+    print_int(y)
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "cast_op", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "7\n" {
+		t.Fatalf("got %q, want %q", got, "7\n")
+	}
+}
+
+// TestVecLiteral verifies vec literal syntax [a, b, c].
+func TestVecLiteral(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn main() -> unit {
+    let v: vec<i64> = [10, 20, 30]
+    print_int(vec_len(v))
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "vec_lit", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "3\n" {
+		t.Fatalf("got %q, want %q", got, "3\n")
+	}
+}
+
+// TestImplMethodCall verifies impl blocks and method call syntax.
+func TestImplMethodCall(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+struct Counter {
+    val: i64,
+}
+
+impl Counter {
+    fn get(self: Counter) -> i64 {
+        return self.val
+    }
+    fn inc(self: Counter) -> Counter {
+        return Counter { val: self.val + 1 }
+    }
+}
+
+fn main() -> unit {
+    let c = Counter { val: 0 }
+    let c2 = c.inc()
+    let c3 = c2.inc()
+    print_int(c3.get())
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "impl_method", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	if got != "2\n" {
+		t.Fatalf("got %q, want %q", got, "2\n")
+	}
+}
+
+// TestLiteralPatternMatch verifies integer and string literal patterns in match.
+func TestLiteralPatternMatch(t *testing.T) {
+	skipIfNoCC(t)
+	src := `
+fn classify(n: i64) -> i64 {
+    return match n {
+        0 => 100,
+        1 => 200,
+        _ => 300,
+    }
+}
+
+fn main() -> unit {
+    print_int(classify(0))
+    print_int(classify(1))
+    print_int(classify(99))
+    return unit
+}
+`
+	dir := t.TempDir()
+	bin := compile(t, dir, "lit_pattern", src)
+	out, err := exec.Command(bin).Output()
+	if err != nil {
+		t.Fatalf("run: %v", err)
+	}
+	got := strings.ReplaceAll(string(out), "\r\n", "\n")
+	want := "100\n200\n300\n"
+	if got != want {
+		t.Fatalf("got %q, want %q", got, want)
 	}
 }

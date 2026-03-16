@@ -65,7 +65,7 @@ fn main() -> unit {
 
 	assertContains(t, out, "#include <stdint.h>")
 	assertContains(t, out, "uint32_t add(")
-	assertContains(t, out, "int main(void)")
+	assertContains(t, out, "int main(int argc, char** argv)")
 	assertContains(t, out, "return (a + b)")
 	assertContains(t, out, "uint32_t x = add(1, 2)")
 	// return unit in main → return 0
@@ -385,4 +385,794 @@ fn f(x: option<u32>) -> u32 {
 	t.Logf("emitted C:\n%s", out)
 	assertContains(t, out, "!= NULL")
 	assertContains(t, out, "== NULL")
+}
+
+// ── set<T> emission tests ─────────────────────────────────────────────────────
+
+func TestSetTypedef(t *testing.T) {
+	src := `
+fn main() -> unit {
+	let mut s: set<i64> = set_new()
+	set_add(s, 42)
+	return unit
+}
+`
+	out := pipeline(t, src)
+	t.Logf("emitted C:\n%s", out)
+	assertContains(t, out, "_CndSet_int64_t")
+	assertContains(t, out, "_CndSetEntry_int64_t")
+	assertContains(t, out, "_cnd_set_new_int64_t()")
+	assertContains(t, out, "_cnd_set_add_int64_t")
+}
+
+func TestSetContainsEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+	let mut s: set<i64> = set_new()
+	set_add(s, 1)
+	if set_contains(s, 1) {
+		print("yes")
+	}
+	return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_cnd_set_contains_int64_t")
+}
+
+func TestSetLenEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+	let mut s: set<i64> = set_new()
+	let n: u64 = set_len(s)
+	return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "._len")
+}
+
+func TestSetStrEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+	let mut s: set<str> = set_new()
+	set_add(s, "hello")
+	return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_CndSet_const_charptr")
+	assertContains(t, out, "strcmp")
+}
+
+// ── lambda emission tests ─────────────────────────────────────────────────────
+
+func TestLambdaEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+	let f: fn(i64) -> i64 = fn(x: i64) -> i64 { return x + 1 }
+	return unit
+}
+`
+	out := pipeline(t, src)
+	t.Logf("emitted C:\n%s", out)
+	assertContains(t, out, "_cnd_lambda_1")
+	assertContains(t, out, "static int64_t _cnd_lambda_1_impl")
+	assertContains(t, out, "return (x + 1)")
+}
+
+func TestLambdaCallEmit(t *testing.T) {
+	src := `
+fn apply(f: fn(i64) -> i64, x: i64) -> i64 { return f(x) }
+fn main() -> unit {
+	let result: i64 = apply(fn(n: i64) -> i64 { return n * 2 }, 5)
+	return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_cnd_lambda_1")
+	// fat-pointer call: f._fn(x, f._env)
+	assertContains(t, out, "f._fn(x, f._env)")
+	// lambda passed as fat-pointer struct literal
+	assertContains(t, out, "_cnd_lambda_1_impl")
+}
+
+func TestLambdaCapture(t *testing.T) {
+	src := `
+fn apply(f: fn(i64) -> i64, x: i64) -> i64 { return f(x) }
+fn main() -> unit {
+	let base: i64 = 10
+	let adder: fn(i64) -> i64 = fn(x: i64) -> i64 { return x + base }
+	let r: i64 = apply(adder, 5)
+	return unit
+}
+`
+	out := pipeline(t, src)
+	t.Logf("emitted C:\n%s", out)
+	// Capture struct emitted
+	assertContains(t, out, "_cnd_lambda_1_env")
+	// Maker function emitted
+	assertContains(t, out, "_cnd_lambda_1_make")
+	// Env unpacked in impl
+	assertContains(t, out, "_e->base")
+}
+
+func TestLambdaReturnUnit(t *testing.T) {
+	src := `
+fn main() -> unit {
+	let f: fn(i64) -> unit = fn(x: i64) -> unit { return unit }
+	return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "static void _cnd_lambda_1_impl")
+}
+
+// ── old() emission tests ─────────────────────────────────────────────────────
+
+func TestOldEmit(t *testing.T) {
+	src := `
+fn add_one(x: i64) -> i64
+    ensures result == old(x) + 1
+{
+    return x + 1
+}
+`
+	out := pipeline(t, src)
+	t.Logf("emitted C:\n%s", out)
+	// old(x) should be captured at function entry
+	assertContains(t, out, "int64_t _cnd")
+	// the ensures assert uses the captured variable, not x directly
+	assertContains(t, out, "_cnd_result")
+	assertContains(t, out, "assert(")
+}
+
+func TestOldMultiple(t *testing.T) {
+	src := `
+fn add(x: i64, y: i64) -> i64
+    ensures result == old(x) + old(y)
+{
+    return x + y
+}
+`
+	out := pipeline(t, src)
+	// Two distinct temp vars should be emitted for the two old() calls
+	assertContains(t, out, "_cnd1")
+	assertContains(t, out, "_cnd2")
+}
+
+func TestOldOutsideEnsures(t *testing.T) {
+	src := `fn f(x: i64) -> i64 requires old(x) > 0 { return x }`
+	tokens, _ := lexer.Tokenize("<test>", src)
+	file, _ := parser.Parse("<test>", tokens)
+	_, err := typeck.Check(file)
+	if err == nil {
+		t.Fatal("expected error for old() in requires, got nil")
+	}
+}
+
+// ── generic function tests ────────────────────────────────────────────────────
+
+func TestGenericIdentity(t *testing.T) {
+	src := `
+fn identity<T>(x: T) -> T { return x }
+fn main() -> unit {
+	let a: i64 = identity(42)
+	let b: bool = identity(true)
+	return unit
+}
+`
+	out := pipeline(t, src)
+	t.Logf("emitted C:\n%s", out)
+	// Mangled names use Candor type names (i64, bool), not C names.
+	assertContains(t, out, "identity__i64")
+	assertContains(t, out, "identity__bool")
+}
+
+func TestGenericMap(t *testing.T) {
+	src := `
+fn map_fn<T>(v: vec<T>, f: fn(T) -> T) -> vec<T> {
+	let result: vec<T> = vec_new()
+	for x in v {
+		vec_push(result, f(x))
+	}
+	return result
+}
+fn double(x: i64) -> i64 { return x * 2 }
+fn main() -> unit {
+	let v: vec<i64> = vec_new()
+	vec_push(v, 1)
+	let d: fn(i64) -> i64 = fn(x: i64) -> i64 { return x * 2 }
+	let result: vec<i64> = map_fn(v, d)
+	return unit
+}
+`
+	out := pipeline(t, src)
+	t.Logf("emitted C:\n%s", out)
+	assertContains(t, out, "map_fn__i64")
+}
+
+// ── New feature emit tests ────────────────────────────────────────────────────
+
+func TestWhileLoopEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let mut i: i64 = 0
+    while i < 3 { i = i + 1 }
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "while (")
+}
+
+func TestConstDeclEmit(t *testing.T) {
+	src := `
+const MAX: i64 = 100
+fn main() -> unit { return unit }
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "static const int64_t MAX = 100")
+}
+
+func TestCastExprEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let x: i32 = 5
+    let y: i64 = x as i64
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "((int64_t)(")
+}
+
+func TestVecLiteralEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let v: vec<i64> = [1, 2, 3]
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_CndVec_int64_t")
+}
+
+func TestImplMethodEmit(t *testing.T) {
+	src := `
+struct Point { x: i64, }
+impl Point {
+    fn getx(self: Point) -> i64 { return self.x }
+}
+fn main() -> unit {
+    let p = Point { x: 7 }
+    let v = p.getx()
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "int64_t Point_getx(")
+	assertContains(t, out, "Point_getx(p")
+}
+
+func TestMapIndexAssignEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let mut m: map<i64, i64> = map_new()
+    map_insert(m, 1, 10)
+    m[1] = 42
+    return unit
+}
+`
+	out := pipeline(t, src)
+	// m[1] = 42 should desugar to map_insert
+	assertContains(t, out, "_cnd_map_insert_")
+}
+
+func TestTupleDestructureEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let t: (i64, i64) = (1, 2)
+    let (a, b) = t
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "._0")
+	assertContains(t, out, "._1")
+}
+
+func TestStructUpdateEmit(t *testing.T) {
+	src := `
+struct Point { x: i64, y: i64, }
+fn main() -> unit {
+    let p = Point { x: 1, y: 2 }
+    let q = Point { ..p, x: 10 }
+    return unit
+}
+`
+	out := pipeline(t, src)
+	// struct update emits a GNU statement expression with a temp copy
+	assertContains(t, out, ".x = 10")
+	assertContains(t, out, "Point ")
+}
+
+func TestClosureByRefEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let mut count: i64 = 0
+    let inc = fn() -> unit { count += 1 }
+    return unit
+}
+`
+	out := pipeline(t, src)
+	// by-ref capture: struct stores int64_t* count, maker passes &(count)
+	assertContains(t, out, "int64_t* count")
+	assertContains(t, out, "&(count)")
+}
+
+// ── M2: Standard library ──────────────────────────────────────────────────────
+
+func TestMathAbsI64Emit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let x: i64 = math_abs_i64(-5)
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_v < 0 ? -_v : _v")
+}
+
+func TestMathSqrtEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let x: f64 = math_sqrt(2.0)
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "sqrt(")
+}
+
+func TestMathPowEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let x: f64 = math_pow(2.0, 3.0)
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "pow(")
+}
+
+func TestMathMinMaxI64Emit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let a: i64 = math_min_i64(1, 2)
+    let b: i64 = math_max_i64(1, 2)
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_a<_b?_a:_b")
+	assertContains(t, out, "_a>_b?_a:_b")
+}
+
+func TestMathClampI64Emit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let x: i64 = math_clamp_i64(5, 0, 10)
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_x<_lo?_lo:_x>_hi?_hi:_x")
+}
+
+func TestStrRepeatEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let s: str = str_repeat("ab", 3)
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_cnd_str_repeat(")
+}
+
+func TestStrTrimEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let s: str = str_trim("  hi  ")
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_cnd_str_trim(")
+}
+
+func TestStrSplitEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let parts: vec<str> = str_split("a,b,c", ",")
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_cnd_vec_push_const_charptr")
+	assertContains(t, out, "strstr")
+}
+
+func TestStrContainsEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let found: bool = str_contains("hello", "ell")
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "strstr(")
+}
+
+func TestStrToUpperLowerEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let u: str = str_to_upper("hello")
+    let l: str = str_to_lower("WORLD")
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_cnd_str_to_upper(")
+	assertContains(t, out, "_cnd_str_to_lower(")
+}
+
+func TestStrReplaceEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let s: str = str_replace("hello", "l", "r")
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_cnd_str_replace(")
+}
+
+func TestPrintErrEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    print_err("oops")
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "fprintf(stderr")
+}
+
+func TestFlushStdoutEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    flush_stdout()
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_cnd_flush_stdout()")
+}
+
+func TestOsArgsEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let args: vec<str> = os_args()
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_cnd_argc")
+	assertContains(t, out, "_cnd_argv")
+}
+
+func TestOsGetenvEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let val: option<str> = os_getenv("HOME")
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "getenv(")
+}
+
+func TestOsExitEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    os_exit(1)
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "exit(")
+}
+
+func TestTimeNowMsEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let t: i64 = time_now_ms()
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_cnd_time_now_ms()")
+}
+
+func TestRandEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let r: u64 = rand_u64()
+    let f: f64 = rand_f64()
+    let n: i64 = rand_range(0, 100)
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_cnd_rand_u64()")
+	assertContains(t, out, "_cnd_rand_f64()")
+	assertContains(t, out, "_cnd_rand_u64() % (uint64_t)")
+}
+
+func TestPathJoinEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let p: str = path_join("/tmp", "file.txt")
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_cnd_path_join(")
+}
+
+func TestPathExistsEmit(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let fnd: bool = path_exists("/tmp")
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "_cnd_path_exists(")
+}
+
+func TestMainHasArgcArgv(t *testing.T) {
+	src := `fn main() -> unit { return unit }`
+	out := pipeline(t, src)
+	assertContains(t, out, "int main(int argc, char** argv)")
+	assertContains(t, out, "_cnd_argc = argc")
+}
+
+// ── M3: Trait / Interface System ─────────────────────────────────────────────
+
+func TestTraitDeclParsed(t *testing.T) {
+	// A trait declaration should parse and type-check without error.
+	src := `
+trait Display {
+    fn fmt(self: str) -> str
+}
+fn main() -> unit { return unit }
+`
+	_ = pipeline(t, src) // just verifying no panic/error
+}
+
+func TestImplForBasic(t *testing.T) {
+	// impl Trait for Type produces a method callable as TypeName_methodName in C.
+	src := `
+struct Point { x: i64, y: i64 }
+
+trait Display {
+    fn fmt(self: ref<Point>) -> str
+}
+
+impl Display for Point {
+    fn fmt(self: ref<Point>) -> str {
+        return "point"
+    }
+}
+
+fn main() -> unit {
+    let p = Point { x: 1, y: 2 }
+    let s: str = Point_fmt(&p)
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "const char* Point_fmt(")
+}
+
+func TestImplForMethodCallViaDot(t *testing.T) {
+	// Trait-impl methods are callable via dot syntax on the receiver.
+	// Use a value receiver so the dot-call works without explicit & operator.
+	src := `
+struct Counter { val: i64 }
+
+trait Display {
+    fn fmt(self: Counter) -> str
+}
+
+impl Display for Counter {
+    fn fmt(self: Counter) -> str {
+        return int_to_str(self.val)
+    }
+}
+
+fn main() -> unit {
+    let c = Counter { val: 42 }
+    let s: str = c.fmt()
+    return unit
+}
+`
+	out := pipeline(t, src)
+	assertContains(t, out, "const char* Counter_fmt(")
+	assertContains(t, out, "Counter_fmt(")
+}
+
+func TestGenericWithTraitBound(t *testing.T) {
+	// Generic function with a trait bound; calling with a type that implements
+	// the trait should monomorphize successfully.
+	src := `
+struct Box { val: i64 }
+
+trait Display {
+    fn fmt(self: ref<Box>) -> str
+}
+
+impl Display for Box {
+    fn fmt(self: ref<Box>) -> str {
+        return int_to_str(self.val)
+    }
+}
+
+fn show<T: Display>(x: ref<T>) -> str {
+    return x.fmt()
+}
+
+fn main() -> unit {
+    let b = Box { val: 7 }
+    let s: str = show(&b)
+    return unit
+}
+`
+	out := pipeline(t, src)
+	// monomorphized as show__Box
+	assertContains(t, out, "show__Box")
+	// the trait impl body is emitted
+	assertContains(t, out, "Box_fmt(")
+}
+
+func TestTraitBoundEnforced(t *testing.T) {
+	// Calling a trait-bounded generic with a type that does NOT implement the
+	// trait must produce a type-check error.
+	src := `
+struct Foo { x: i64 }
+struct Bar { y: i64 }
+
+trait Display {
+    fn fmt(self: ref<Foo>) -> str
+}
+
+impl Display for Foo {
+    fn fmt(self: ref<Foo>) -> str { return "foo" }
+}
+
+fn show<T: Display>(x: ref<T>) -> str {
+    return x.fmt()
+}
+
+fn main() -> unit {
+    let b = Bar { y: 1 }
+    let s: str = show(&b)
+    return unit
+}
+`
+	tokens, _ := lexer.Tokenize("<test>", src)
+	file, _ := parser.Parse("<test>", tokens)
+	_, err := typeck.Check(file)
+	if err == nil {
+		t.Fatal("expected type error: Bar does not implement Display, got nil")
+	}
+	if !strings.Contains(err.Error(), "Display") {
+		t.Errorf("error should mention 'Display', got: %v", err)
+	}
+}
+
+// ── M4.4 Formatter tests ──────────────────────────────────────────────────────
+
+func TestFormatCandorSimpleFn(t *testing.T) {
+	src := `fn add(a: i64, b: i64) -> i64 {
+	return a + b
+}`
+	tokens, err := lexer.Tokenize("<test>", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := parser.Parse("<test>", tokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := FormatCandor(file)
+	if !strings.Contains(out, "fn add(a: i64, b: i64) -> i64 {") {
+		t.Errorf("missing fn signature in formatted output:\n%s", out)
+	}
+	if !strings.Contains(out, "return a + b") {
+		t.Errorf("missing return statement in formatted output:\n%s", out)
+	}
+}
+
+func TestFormatCandorStruct(t *testing.T) {
+	src := `struct Point { x: f64, y: f64, }`
+	tokens, err := lexer.Tokenize("<test>", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := parser.Parse("<test>", tokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := FormatCandor(file)
+	if !strings.Contains(out, "struct Point {") {
+		t.Errorf("missing struct header: %q", out)
+	}
+	if !strings.Contains(out, "x: f64,") {
+		t.Errorf("missing field x: %q", out)
+	}
+}
+
+func TestFormatCandorBlankLineBetweenDecls(t *testing.T) {
+	src := `fn a() -> unit { return unit }
+fn b() -> unit { return unit }`
+	tokens, err := lexer.Tokenize("<test>", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := parser.Parse("<test>", tokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := FormatCandor(file)
+	if !strings.Contains(out, "\n\n") {
+		t.Errorf("expected blank line between declarations:\n%q", out)
+	}
+}
+
+// ── M4.5 Test directive tests ─────────────────────────────────────────────────
+
+func TestTestDirectiveParsed(t *testing.T) {
+	src := `#test
+fn test_add() -> unit {
+	assert 1 + 1 == 2
+	return unit
+}`
+	tokens, err := lexer.Tokenize("<test>", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := parser.Parse("<test>", tokens)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(file.Decls) == 0 {
+		t.Fatal("expected at least one declaration")
+	}
+	fn, ok := file.Decls[0].(*parser.FnDecl)
+	if !ok {
+		t.Fatalf("expected FnDecl, got %T", file.Decls[0])
+	}
+	found := false
+	for _, d := range fn.Directives {
+		if d == "test" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected 'test' in Directives, got %v", fn.Directives)
+	}
 }

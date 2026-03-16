@@ -55,6 +55,18 @@ var BuiltinTypes = map[string]Type{
 	"f32": TF32, "f64": TF64,
 }
 
+// ── Type variable ─────────────────────────────────────────────────────────────
+
+// TypeVar is a generic type parameter placeholder (e.g. T, R).
+// Only exists transiently during monomorphization; never appears in final Result.
+type TypeVar struct{ Name string }
+
+func (t TypeVar) String() string       { return t.Name }
+func (t TypeVar) Equals(other Type) bool {
+	o, ok := other.(TypeVar)
+	return ok && o.Name == t.Name
+}
+
 // ── Generic / parameterised types ────────────────────────────────────────────
 
 // GenType is a parameterised type: ref<T>, option<T>, result<T,E>, vec<T>, etc.
@@ -142,6 +154,39 @@ func (s *StructType) Equals(other Type) bool {
 	return ok && o.Name == s.Name
 }
 
+// ── Tuple type ────────────────────────────────────────────────────────────────
+
+// TupleType is an anonymous product type: (T0, T1, ...).
+type TupleType struct {
+	Elems []Type
+}
+
+func (t *TupleType) String() string {
+	var sb strings.Builder
+	sb.WriteByte('(')
+	for i, e := range t.Elems {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(e.String())
+	}
+	sb.WriteByte(')')
+	return sb.String()
+}
+
+func (t *TupleType) Equals(other Type) bool {
+	o, ok := other.(*TupleType)
+	if !ok || len(o.Elems) != len(t.Elems) {
+		return false
+	}
+	for i := range t.Elems {
+		if !t.Elems[i].Equals(o.Elems[i]) {
+			return false
+		}
+	}
+	return true
+}
+
 // ── Enum type ─────────────────────────────────────────────────────────────────
 
 // EnumVariantDef describes one variant of a user-defined enum.
@@ -163,6 +208,24 @@ func (e *EnumType) Equals(other Type) bool {
 	o, ok := other.(*EnumType)
 	return ok && o.Name == e.Name
 }
+
+// TraitDef holds a collected trait declaration — its name and method signatures.
+// The method signatures use a special *SelfType placeholder for the Self type.
+type TraitDef struct {
+	Name    string
+	Methods map[string]*FnType // method name → signature (Self represented as SelfType)
+}
+
+// SelfType is a placeholder used inside trait method signatures to represent
+// the implementing type. It is substituted with the concrete type during
+// impl-for checking.
+type SelfType struct{}
+
+func (s *SelfType) String() string           { return "Self" }
+func (s *SelfType) Equals(other Type) bool   { _, ok := other.(*SelfType); return ok }
+
+// TSelf is the singleton SelfType placeholder.
+var TSelf Type = &SelfType{}
 
 // ── Type predicates ───────────────────────────────────────────────────────────
 
@@ -188,6 +251,46 @@ func IsFloatType(t Type) bool {
 
 func IsNumericType(t Type) bool { return IsIntType(t) || IsFloatType(t) }
 
+// numericRank returns an ordering for lossless widening:
+//
+//	i8(0) < i16(1) < i32(2) < i64(3) < i128(4)
+//	u8(10) < u16(11) < u32(12) < u64(13) < u128(14)
+//	f32(20) < f64(21)
+//
+// Returns -1 for non-widening types.
+func numericRank(t Type) int {
+	p, ok := t.(*Prim)
+	if !ok {
+		return -1
+	}
+	switch p.name {
+	case "i8":   return 0
+	case "i16":  return 1
+	case "i32":  return 2
+	case "i64":  return 3
+	case "i128": return 4
+	case "u8":   return 10
+	case "u16":  return 11
+	case "u32":  return 12
+	case "u64":  return 13
+	case "u128": return 14
+	case "f32":  return 20
+	case "f64":  return 21
+	}
+	return -1
+}
+
+// IsNumericWider returns true if src can be implicitly widened to dst:
+// same family (signed int / unsigned int / float) and strictly narrower rank.
+func IsNumericWider(src, dst Type) bool {
+	sr := numericRank(src)
+	dr := numericRank(dst)
+	if sr < 0 || dr < 0 {
+		return false
+	}
+	return (sr / 10) == (dr / 10) && sr < dr
+}
+
 // ── Type coercion and unification ─────────────────────────────────────────────
 
 // Coerce returns (resolved, true) if src is assignable to dst.
@@ -204,6 +307,10 @@ func Coerce(src, dst Type) (Type, bool) {
 		return dst, true
 	}
 	if src.Equals(TNever) {
+		return dst, true
+	}
+	// Implicit numeric widening: i8→i16→i32→i64→i128, u8→…→u128, f32→f64.
+	if IsNumericWider(src, dst) {
 		return dst, true
 	}
 	// refmut<T> coerces to ref<T> — a mutable reference satisfies a read-only reference parameter

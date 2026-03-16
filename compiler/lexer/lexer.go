@@ -175,16 +175,36 @@ func (l *lexer) scanOne() error {
 		l.emit(TokAt, "@", line, col)
 	case '+':
 		l.advance()
-		l.emit(TokPlus, "+", line, col)
+		if l.peek() == '=' {
+			l.advance()
+			l.emit(TokPlusEq, "+=", line, col)
+		} else {
+			l.emit(TokPlus, "+", line, col)
+		}
 	case '*':
 		l.advance()
-		l.emit(TokStar, "*", line, col)
+		if l.peek() == '=' {
+			l.advance()
+			l.emit(TokStarEq, "*=", line, col)
+		} else {
+			l.emit(TokStar, "*", line, col)
+		}
 	case '/':
 		l.advance()
-		l.emit(TokSlash, "/", line, col)
+		if l.peek() == '=' {
+			l.advance()
+			l.emit(TokSlashEq, "/=", line, col)
+		} else {
+			l.emit(TokSlash, "/", line, col)
+		}
 	case '%':
 		l.advance()
-		l.emit(TokPercent, "%", line, col)
+		if l.peek() == '=' {
+			l.advance()
+			l.emit(TokPercentEq, "%=", line, col)
+		} else {
+			l.emit(TokPercent, "%", line, col)
+		}
 	case ':':
 		l.advance()
 		if l.peek() == ':' {
@@ -214,6 +234,9 @@ func (l *lexer) scanOne() error {
 		if l.peek() == '>' {
 			l.advance()
 			l.emit(TokArrow, "->", line, col)
+		} else if l.peek() == '=' {
+			l.advance()
+			l.emit(TokMinusEq, "-=", line, col)
 		} else {
 			l.emit(TokMinus, "-", line, col)
 		}
