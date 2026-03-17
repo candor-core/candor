@@ -34,6 +34,7 @@ traits, effects, contracts, pattern matching, and a standard library.
 | **M9.3** | Candor lexer written in Candor (`src/compiler/lexer.cnd`): all token kinds, keyword map, scanners for ident/int/float/str/directive/sym; `TestM9LexerSource` passes |
 | **M9.4** | Candor parser written in Candor (`src/compiler/parser.cnd`): full AST (TypeExpr, Expr, Stmt, Decl), recursive-descent parser with `box<T>` for recursive nodes; `TestM9ParserSource` passes |
 | **M10.3** | Hardware effect tiers: `gpu`, `net`, `storage`, `mem`, `async` added to `KnownEffects`; unknown effect names produce a compiler warning; subset-checking enforced across all new tiers |
+| **M10.4** | `arc<T>` shared reference-counted ownership: `arc_new`, `arc_clone`, `arc_deref`, `arc_drop` builtins; C backend uses `[int64 refcount][T]` layout with `__sync_fetch_and_add`/`__sync_sub_and_fetch`; LLVM backend uses `atomicrmw`; 9 typeck tests pass |
 
 ### Known language gaps (not yet wired)
 - Named-return / early-exit in closures

@@ -1641,6 +1641,78 @@ fn make_node(v: i64) -> Node {
 	}
 }
 
+// ── M10.4: arc<T> shared reference-counted ownership ─────────────────────────
+
+func TestArcNew(t *testing.T) {
+	if _, err := compile(`fn f() -> unit {
+		let a: arc<i64> = arc_new(42)
+		return unit
+	}`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestArcClone(t *testing.T) {
+	if _, err := compile(`fn f() -> unit {
+		let a: arc<i64> = arc_new(10)
+		let b: arc<i64> = arc_clone(a)
+		arc_drop(b)
+		arc_drop(a)
+		return unit
+	}`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestArcDeref(t *testing.T) {
+	if _, err := compile(`fn f() -> i64 {
+		let a: arc<i64> = arc_new(99)
+		return arc_deref(a)
+	}`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestArcDrop(t *testing.T) {
+	if _, err := compile(`fn f() -> unit {
+		let a: arc<i64> = arc_new(1)
+		arc_drop(a)
+		return unit
+	}`); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestArcNewWrongArgCount(t *testing.T) {
+	mustFail(t, `fn f() -> unit { let a: arc<i64> = arc_new() return unit }`, "arc_new() takes 1 argument")
+}
+
+func TestArcCloneWrongType(t *testing.T) {
+	mustFail(t, `fn f() -> unit { let a: arc<i64> = arc_clone(42) return unit }`, "arc_clone() requires arc<T>")
+}
+
+func TestArcDerefWrongType(t *testing.T) {
+	mustFail(t, `fn f() -> i64 { return arc_deref(42) }`, "arc_deref() requires arc<T>")
+}
+
+func TestArcDropWrongType(t *testing.T) {
+	mustFail(t, `fn f() -> unit { arc_drop(42) return unit }`, "arc_drop() requires arc<T>")
+}
+
+func TestArcInStruct(t *testing.T) {
+	// arc<T> field enables shared ownership of heap values
+	if _, err := compile(`
+struct Shared {
+	val: i64,
+	data: arc<i64>,
+}
+fn make_shared(v: i64) -> Shared {
+	return Shared { val: v, data: arc_new(v) }
+}`); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // ── M10.3: hardware effect tiers ─────────────────────────────────────────────
 
 func TestEffectsGpu(t *testing.T) {

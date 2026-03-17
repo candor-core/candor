@@ -1423,6 +1423,14 @@ func (c *checker) inferExpr(expr parser.Expr, sc *scope, hint Type) (Type, error
 				return c.inferBoxDeref(e, ident, sc)
 			case "box_drop":
 				return c.inferBoxDrop(e, ident, sc)
+			case "arc_new":
+				return c.inferArcNew(e, ident, sc, hint)
+			case "arc_clone":
+				return c.inferArcClone(e, ident, sc)
+			case "arc_deref":
+				return c.inferArcDeref(e, ident, sc)
+			case "arc_drop":
+				return c.inferArcDrop(e, ident, sc)
 			case "refmut":
 				return c.inferRefmutCall(e, sc)
 			}
@@ -2865,6 +2873,76 @@ func (c *checker) inferBoxDrop(e *parser.CallExpr, fn *parser.IdentExpr, sc *sco
 	c.record(fn, TUnit)
 	return TUnit, nil
 }
+
+// -- arc built-in functions -------------------------------------------------
+
+func (c *checker) inferArcNew(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope, hint Type) (Type, error) {
+	if len(e.Args) != 1 {
+		return nil, c.errorf(e.LParen, "arc_new() takes 1 argument: the value to reference-count")
+	}
+	var innerHint Type
+	if gen, ok := hint.(*GenType); ok && gen.Con == "arc" && len(gen.Params) > 0 {
+		innerHint = gen.Params[0]
+	}
+	argType, err := c.checkExpr(e.Args[0], sc, innerHint)
+	if err != nil {
+		return nil, err
+	}
+	t := &GenType{Con: "arc", Params: []Type{argType}}
+	c.record(fn, t)
+	return t, nil
+}
+
+func (c *checker) inferArcClone(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 1 {
+		return nil, c.errorf(e.LParen, "arc_clone() takes 1 argument: arc<T>")
+	}
+	argType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := argType.(*GenType)
+	if !ok || gen.Con != "arc" || len(gen.Params) != 1 {
+		return nil, c.errorf(e.Args[0].Pos(), "arc_clone() requires arc<T>, got %s", argType)
+	}
+	c.record(fn, gen)
+	return gen, nil
+}
+
+func (c *checker) inferArcDeref(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 1 {
+		return nil, c.errorf(e.LParen, "arc_deref() takes 1 argument: arc<T>")
+	}
+	argType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := argType.(*GenType)
+	if !ok || gen.Con != "arc" || len(gen.Params) != 1 {
+		return nil, c.errorf(e.Args[0].Pos(), "arc_deref() requires arc<T>, got %s", argType)
+	}
+	inner := gen.Params[0]
+	c.record(fn, inner)
+	return inner, nil
+}
+
+func (c *checker) inferArcDrop(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 1 {
+		return nil, c.errorf(e.LParen, "arc_drop() takes 1 argument: arc<T>")
+	}
+	argType, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	gen, ok := argType.(*GenType)
+	if !ok || gen.Con != "arc" || len(gen.Params) != 1 {
+		return nil, c.errorf(e.Args[0].Pos(), "arc_drop() requires arc<T>, got %s", argType)
+	}
+	_ = gen
+	c.record(fn, TUnit)
+	return TUnit, nil
+}
+
 
 func (c *checker) inferConstructorCall(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope, hint Type) (Type, error) {
 	switch fn.Tok.Type {

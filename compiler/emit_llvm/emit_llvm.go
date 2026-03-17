@@ -185,7 +185,7 @@ func (em *llEmitter) llType(t typeck.Type) string {
 			return "%_cnd_vec"
 		case "ring":
 			return "%_cnd_ring"
-		case "ref", "refmut", "option", "result", "map", "set", "box":
+		case "ref", "refmut", "option", "result", "map", "set", "box", "arc":
 			return "ptr"
 		}
 		return "ptr"
@@ -2195,6 +2195,96 @@ func (em *llEmitter) emitBuiltinCall(e *parser.CallExpr, name string) (string, b
 			return "undef", true, err
 		}
 		em.wif(`call void @free(ptr %s)`, ptrReg)
+		return "undef", true, nil
+
+	// -- arc built-in functions -----------------------------------------------
+
+	case "arc_new":
+		// arc_new(val) → malloc(8+sizeof(T)), store refcount=1 at base, store val at base+8
+		if len(e.Args) < 1 {
+			return "undef", true, nil
+		}
+		innerTy := em.res.ExprTypes[e.Args[0]]
+		if innerTy == nil {
+			return "undef", true, nil
+		}
+		llInner := em.llType(innerTy)
+		valReg, err := em.emitExpr(e.Args[0])
+		if err != nil {
+			return "undef", true, err
+		}
+		// Compute size = 8 + sizeof(T) via getelementptr trick on {i64, T}
+		szPtr := em.fresh()
+		szInt := em.fresh()
+		basePtr := em.fresh()
+		valPtr := em.fresh()
+		em.wif(`%s = getelementptr {i64, %s}, ptr null, i64 1`, szPtr, llInner)
+		em.wif(`%s = ptrtoint ptr %s to i64`, szInt, szPtr)
+		em.wif(`%s = call ptr @malloc(i64 %s)`, basePtr, szInt)
+		// store refcount = 1
+		em.wif(`store i64 1, ptr %s`, basePtr)
+		// compute pointer to value field (offset 8)
+		em.wif(`%s = getelementptr {i64, %s}, ptr %s, i64 0, i32 1`, valPtr, llInner, basePtr)
+		em.wif(`store %s %s, ptr %s`, llInner, valReg, valPtr)
+		return valPtr, true, nil
+
+	case "arc_clone":
+		// arc_clone(a) → atomicrmw add on refcount, return same ptr
+		if len(e.Args) < 1 {
+			return "undef", true, nil
+		}
+		ptrReg, err := em.emitExpr(e.Args[0])
+		if err != nil {
+			return "undef", true, err
+		}
+		rcPtr := em.fresh()
+		oldRc := em.fresh()
+		em.wif(`%s = getelementptr i64, ptr %s, i64 -1`, rcPtr, ptrReg)
+		em.wif(`%s = atomicrmw add ptr %s, i64 1 seq_cst`, oldRc, rcPtr)
+		return ptrReg, true, nil
+
+	case "arc_deref":
+		// arc_deref(a) → load T from ptr (same as box_deref)
+		if len(e.Args) < 1 {
+			return "undef", true, nil
+		}
+		argTy, ok := em.res.ExprTypes[e.Args[0]].(*typeck.GenType)
+		if !ok || argTy.Con != "arc" || len(argTy.Params) == 0 {
+			return "undef", true, nil
+		}
+		llInner := em.llType(argTy.Params[0])
+		ptrReg, err := em.emitExpr(e.Args[0])
+		if err != nil {
+			return "undef", true, err
+		}
+		result := em.fresh()
+		em.wif(`%s = load %s, ptr %s`, result, llInner, ptrReg)
+		return result, true, nil
+
+	case "arc_drop":
+		// arc_drop(a) → atomicrmw sub refcount; if result==0, free base (ptr-8)
+		if len(e.Args) < 1 {
+			return "undef", true, nil
+		}
+		ptrReg, err := em.emitExpr(e.Args[0])
+		if err != nil {
+			return "undef", true, err
+		}
+		rcPtr := em.fresh()
+		oldVal := em.fresh()
+		isZero := em.fresh()
+		basePtr := em.fresh()
+		freeLbl := em.freshBlk("arc.free")
+		doneLbl := em.freshBlk("arc.done")
+		em.wif(`%s = getelementptr i64, ptr %s, i64 -1`, rcPtr, ptrReg)
+		em.wif(`%s = atomicrmw sub ptr %s, i64 1 seq_cst`, oldVal, rcPtr)
+		em.wif(`%s = icmp eq i64 %s, 1`, isZero, oldVal)
+		em.wif(`br i1 %s, label %%%s, label %%%s`, isZero, freeLbl, doneLbl)
+		em.lbl(freeLbl)
+		em.wif(`%s = getelementptr i64, ptr %s, i64 -1`, basePtr, ptrReg)
+		em.wif(`call void @free(ptr %s)`, basePtr)
+		em.wif(`br label %%%s`, doneLbl)
+		em.lbl(doneLbl)
 		return "undef", true, nil
 
 	// ── map / set stubs (not yet implemented in LLVM backend) ────────────────

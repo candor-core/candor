@@ -2337,6 +2337,24 @@ func (e *emitter) emitExpr(expr parser.Expr, sb *strings.Builder) error {
 					return nil
 				}
 			}
+			if ident.Tok.Lexeme == "arc_new" {
+				t := e.res.ExprTypes[ident]
+				if gen, ok2 := t.(*typeck.GenType); ok2 && gen.Con == "arc" && len(gen.Params) == 1 {
+					innerC, err := e.cType(gen.Params[0])
+					if err != nil {
+						return err
+					}
+					// arc_new(val) → alloc [int64 refcount][T value], set refcount=1, return T*
+					fmt.Fprintf(sb, "({ int64_t* __arc = malloc(8+sizeof(%s)); *__arc = 1; %s* __p = (%s*)(__arc+1); *__p = ", innerC, innerC, innerC)
+					if len(ex.Args) == 1 {
+						if err := e.emitExpr(ex.Args[0], sb); err != nil {
+							return err
+						}
+					}
+					fmt.Fprintf(sb, "; __p; })")
+					return nil
+				}
+			}
 			if ident.Tok.Lexeme == "box_new" {
 				t := e.res.ExprTypes[ident]
 				if gen, ok2 := t.(*typeck.GenType); ok2 && gen.Con == "box" && len(gen.Params) == 1 {
@@ -3033,6 +3051,50 @@ func (e *emitter) emitBuiltinCall(name string, args []parser.Expr, sb *strings.B
 			return true, err
 		}
 		sb.WriteByte(')')
+		return true, nil
+
+	case "arc_clone":
+		// arc_clone(a) → atomically increment refcount, return same pointer
+		if len(args) != 1 {
+			return false, nil
+		}
+		sb.WriteString("({ __typeof__(")
+		if err := e.emitExpr(args[0], sb); err != nil {
+			return true, err
+		}
+		sb.WriteString(") __ac = ")
+		if err := e.emitExpr(args[0], sb); err != nil {
+			return true, err
+		}
+		sb.WriteString("; __sync_fetch_and_add((int64_t*)((char*)__ac - 8), 1); __ac; })")
+		return true, nil
+
+	case "arc_deref":
+		// arc_deref(a) → (*a)
+		if len(args) != 1 {
+			return false, nil
+		}
+		sb.WriteString("(*")
+		if err := e.emitExpr(args[0], sb); err != nil {
+			return true, err
+		}
+		sb.WriteByte(')')
+		return true, nil
+
+	case "arc_drop":
+		// arc_drop(a) → decrement refcount, free block if zero
+		if len(args) != 1 {
+			return false, nil
+		}
+		sb.WriteString("({ __typeof__(")
+		if err := e.emitExpr(args[0], sb); err != nil {
+			return true, err
+		}
+		sb.WriteString(") __ad = ")
+		if err := e.emitExpr(args[0], sb); err != nil {
+			return true, err
+		}
+		sb.WriteString("; if (__sync_sub_and_fetch((int64_t*)((char*)__ad - 8), 1) == 0) free((char*)__ad - 8); })")
 		return true, nil
 
 	case "print_char":
@@ -4418,6 +4480,14 @@ func (e *emitter) cType(t typeck.Type) (string, error) {
 					return "", err
 				}
 				return inner + "*", nil // owned heap pointer
+			}
+		case "arc":
+			if len(tt.Params) == 1 {
+				inner, err := e.cType(tt.Params[0])
+				if err != nil {
+					return "", err
+				}
+				return inner + "*", nil // arc<T>: T* with refcount at ptr-8
 			}
 		case "result":
 			if len(tt.Params) == 2 {
