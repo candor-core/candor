@@ -442,3 +442,273 @@ struct TypedFile {
     errors:   vec<str>
     warnings: vec<str>
 }
+
+## ── Phase 2: declaration AST stubs + signature collection ───────────────────
+##
+## These types mirror parser.cnd declarations.
+## Stmt/Expr are one-variant stubs — bodies are not inspected until Phase 4.
+
+## ── body stubs ───────────────────────────────────────────────────────────────
+enum Stmt { StmtBlob }
+enum Expr { ExprBlob }
+
+## ── declaration node types (mirrored from parser.cnd) ───────────────────────
+struct Param           { name: str, typ: TypeExpr }
+struct StructFieldDecl { name: str, typ: TypeExpr }
+struct EnumVariant     { name: str, payload: option<TypeExpr> }
+
+struct FnDecl    { name: str, type_params: vec<str>, params: vec<Param>,
+                   ret: TypeExpr, pure_: bool, body: vec<Stmt>, line: i64 }
+struct StructDecl { name: str, type_params: vec<str>, fields: vec<StructFieldDecl>, line: i64 }
+struct EnumDecl   { name: str, type_params: vec<str>, variants: vec<EnumVariant>, line: i64 }
+struct ExternDecl { name: str, params: vec<Param>, ret: TypeExpr, line: i64 }
+struct ConstDecl  { name: str, typ: TypeExpr, value: Expr, line: i64 }
+
+## Minimal stubs for trait/impl — not processed in Phase 2
+struct TraitDecl { name: str }
+struct ImplDecl  { type_name: str }
+
+enum Decl {
+    FnD(box<FnDecl>),
+    StructD(box<StructDecl>),
+    EnumD(box<EnumDecl>),
+    ExternD(box<ExternDecl>),
+    ConstD(box<ConstDecl>),
+    TraitD(box<TraitDecl>),
+    ImplD(box<ImplDecl>),
+    ModuleD(str),
+    UseD(str),
+}
+
+struct ParsedFile { name: str, decls: vec<Decl> }
+
+## ── helper: resolve a vec<Param> to vec<ParamSig> ───────────────────────────
+fn collect_params(params: vec<Param>, env: ref<TypeEnv>) -> result<vec<ParamSig>, str> {
+    let mut sigs: vec<ParamSig> = vec_new()
+    let n = vec_len(params) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let p = params[i as u64]
+        let pt = resolve_type(p.typ, env) must {
+            ok(t)  => t
+            err(e) => return err(e)
+        }
+        vec_push(sigs, ParamSig{ name: p.name, typ: pt })
+        i = i + 1
+    }
+    return ok(sigs)
+}
+
+## ── Pass 1: register struct/enum names ───────────────────────────────────────
+## Registers bare names with empty field/variant lists so that forward
+## references within the same file can be resolved during Pass 2.
+
+fn register_struct_name(sd: box<StructDecl>, env: refmut<TypeEnv>) -> unit {
+    let s = box_deref(sd)
+    map_insert(env.structs, s.name, StructDef{ name: s.name, fields: vec_new() })
+    return unit
+}
+
+fn register_enum_name(ed: box<EnumDecl>, env: refmut<TypeEnv>) -> unit {
+    let e = box_deref(ed)
+    map_insert(env.enums, e.name, EnumDef{ name: e.name, variants: vec_new() })
+    return unit
+}
+
+fn pass1_decl(d: Decl, env: refmut<TypeEnv>) -> unit {
+    match d {
+        Decl::StructD(sd)  => register_struct_name(sd, env)
+        Decl::EnumD(ed)    => register_enum_name(ed, env)
+        Decl::FnD(fd)      => unit
+        Decl::ExternD(xd)  => unit
+        Decl::ConstD(cd)   => unit
+        Decl::TraitD(td)   => unit
+        Decl::ImplD(id)    => unit
+        Decl::ModuleD(nm)  => unit
+        Decl::UseD(nm)     => unit
+    }
+}
+
+fn pass1(pf: ref<ParsedFile>, env: refmut<TypeEnv>) -> unit {
+    let n = vec_len(pf.decls) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        pass1_decl(pf.decls[i as u64], env)
+        i = i + 1
+    }
+    return unit
+}
+
+## ── Pass 2: resolve field/variant/param types and register full definitions ───
+##
+## Constraint: must{} block arms evaluate to unit even if the block ends with a
+## non-unit expression.  Every arm that returns a typed value must be a bare
+## single-expression arm (usually a helper function call).
+
+## Error-default helpers — called as bare must-arm expressions so that both
+## arms of each must{} produce the same type without block syntax.
+
+fn field_def_unknown(fname: str, sname: str, e: str, env: refmut<TypeEnv>) -> FieldDef {
+    env_error(env, str_concat("struct ", str_concat(sname,
+        str_concat(".", str_concat(fname, str_concat(": ", e))))))
+    return FieldDef{ name: fname, typ: ty_unknown() }
+}
+
+fn variant_payload_unknown(ename: str, vname: str, e: str, env: refmut<TypeEnv>) -> option<Type> {
+    env_error(env, str_concat("enum ", str_concat(ename,
+        str_concat("::", str_concat(vname, str_concat(": ", e))))))
+    return some(ty_unknown())
+}
+
+fn empty_params_with_err(prefix: str, e: str, env: refmut<TypeEnv>) -> vec<ParamSig> {
+    env_error(env, str_concat(prefix, e))
+    return vec_new()
+}
+
+fn unknown_ret_with_err(prefix: str, e: str, env: refmut<TypeEnv>) -> Type {
+    env_error(env, str_concat(prefix, e))
+    return ty_unknown()
+}
+
+## Higher-level resolution helpers
+
+fn collect_params_or(params: vec<Param>, prefix: str, env: refmut<TypeEnv>) -> vec<ParamSig> {
+    collect_params(params, env) must {
+        ok(ps) => ps
+        err(e) => empty_params_with_err(prefix, e, env)
+    }
+}
+
+fn resolve_ret_or(ret_te: TypeExpr, prefix: str, env: refmut<TypeEnv>) -> Type {
+    resolve_type(ret_te, env) must {
+        ok(t)  => t
+        err(e) => unknown_ret_with_err(prefix, e, env)
+    }
+}
+
+fn fill_variant_payload(te: TypeExpr, ename: str, vname: str, env: refmut<TypeEnv>) -> option<Type> {
+    resolve_type(te, env) must {
+        ok(t)  => some(t)
+        err(e) => variant_payload_unknown(ename, vname, e, env)
+    }
+}
+
+## none_type_opt: returns option<Type> none so must arms can match option<Type>.
+fn none_type_opt() -> option<Type> pure { return none }
+
+fn resolve_variant_payload(payload: option<TypeExpr>, ename: str, vname: str,
+                            env: refmut<TypeEnv>) -> option<Type> {
+    payload must {
+        none     => none_type_opt()
+        some(te) => fill_variant_payload(te, ename, vname, env)
+    }
+}
+
+fn fill_struct_field(f: StructFieldDecl, sname: str, env: refmut<TypeEnv>) -> FieldDef {
+    let fname = f.name
+    resolve_type(f.typ, env) must {
+        ok(t)  => FieldDef{ name: fname, typ: t }
+        err(e) => field_def_unknown(fname, sname, e, env)
+    }
+}
+
+fn fill_struct(sd: box<StructDecl>, env: refmut<TypeEnv>) -> unit {
+    let s = box_deref(sd)
+    let sname = s.name
+    let mut fields: vec<FieldDef> = vec_new()
+    let nf = vec_len(s.fields) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= nf { break }
+        let fd = fill_struct_field(s.fields[i as u64], sname, env)
+        vec_push(fields, fd)
+        i = i + 1
+    }
+    map_insert(env.structs, sname, StructDef{ name: sname, fields: fields })
+    return unit
+}
+
+fn fill_enum_variant(v: EnumVariant, ename: str, env: refmut<TypeEnv>) -> VariantDef {
+    let vname = v.name
+    let payload = resolve_variant_payload(v.payload, ename, vname, env)
+    return VariantDef{ name: vname, payload: payload }
+}
+
+fn fill_enum(ed: box<EnumDecl>, env: refmut<TypeEnv>) -> unit {
+    let e = box_deref(ed)
+    let ename = e.name
+    let mut variants: vec<VariantDef> = vec_new()
+    let nv = vec_len(e.variants) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= nv { break }
+        let vd = fill_enum_variant(e.variants[i as u64], ename, env)
+        vec_push(variants, vd)
+        i = i + 1
+    }
+    map_insert(env.enums, ename, EnumDef{ name: ename, variants: variants })
+    return unit
+}
+
+fn fill_fn(fd: box<FnDecl>, env: refmut<TypeEnv>) -> unit {
+    let f = box_deref(fd)
+    let fname = f.name
+    let is_generic = vec_len(f.type_params) as i64 > 0
+    let params = f.params
+    let ret_te = f.ret
+    let pfx = str_concat("fn ", str_concat(fname, ": "))
+    let psigs = collect_params_or(params, pfx, env)
+    let rpfx = str_concat("fn ", str_concat(fname, " return: "))
+    let ret = resolve_ret_or(ret_te, rpfx, env)
+    map_insert(env.fns, fname, FnSig{ params: psigs, ret: ret, is_generic: is_generic })
+    return unit
+}
+
+fn fill_extern(xd: box<ExternDecl>, env: refmut<TypeEnv>) -> unit {
+    let x = box_deref(xd)
+    let xname = x.name
+    let params = x.params
+    let ret_te = x.ret
+    let pfx = str_concat("extern ", str_concat(xname, ": "))
+    let psigs = collect_params_or(params, pfx, env)
+    let rpfx = str_concat("extern ", str_concat(xname, " return: "))
+    let ret = resolve_ret_or(ret_te, rpfx, env)
+    map_insert(env.fns, xname, FnSig{ params: psigs, ret: ret, is_generic: false })
+    return unit
+}
+
+fn pass2_decl(d: Decl, env: refmut<TypeEnv>) -> unit {
+    match d {
+        Decl::StructD(sd)  => fill_struct(sd, env)
+        Decl::EnumD(ed)    => fill_enum(ed, env)
+        Decl::FnD(fd)      => fill_fn(fd, env)
+        Decl::ExternD(xd)  => fill_extern(xd, env)
+        Decl::ConstD(cd)   => unit
+        Decl::TraitD(td)   => unit
+        Decl::ImplD(id)    => unit
+        Decl::ModuleD(nm)  => unit
+        Decl::UseD(nm)     => unit
+    }
+}
+
+fn pass2(pf: ref<ParsedFile>, env: refmut<TypeEnv>) -> unit {
+    let n = vec_len(pf.decls) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        pass2_decl(pf.decls[i as u64], env)
+        i = i + 1
+    }
+    return unit
+}
+
+## ── public entry point ────────────────────────────────────────────────────────
+## collect_signatures: two-pass signature collection from a parsed file.
+## After this call, env.structs, env.enums, and env.fns are populated.
+fn collect_signatures(pf: ref<ParsedFile>, env: refmut<TypeEnv>) -> unit {
+    pass1(pf, env)
+    pass2(pf, env)
+    return unit
+}
