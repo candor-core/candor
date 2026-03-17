@@ -33,6 +33,7 @@ traits, effects, contracts, pattern matching, and a standard library.
 | **M9.2** | `box<T>` recursive heap types: `box_new` (malloc+store), `box_deref` (load), `box_drop` (free); C backend: `T*`; LLVM backend: `ptr`; `none → option<T>` coercion added |
 | **M9.3** | Candor lexer written in Candor (`src/compiler/lexer.cnd`): all token kinds, keyword map, scanners for ident/int/float/str/directive/sym; `TestM9LexerSource` passes |
 | **M9.4** | Candor parser written in Candor (`src/compiler/parser.cnd`): full AST (TypeExpr, Expr, Stmt, Decl), recursive-descent parser with `box<T>` for recursive nodes; `TestM9ParserSource` passes |
+| **M10.3** | Hardware effect tiers: `gpu`, `net`, `storage`, `mem`, `async` added to `KnownEffects`; unknown effect names produce a compiler warning; subset-checking enforced across all new tiers |
 
 ### Known language gaps (not yet wired)
 - Named-return / early-exit in closures
@@ -283,10 +284,11 @@ fn transfer_kv_block(src: ref<GPUBuffer>, dst: refmut<GPUBuffer>) -> unit
 - The effect propagates: calling an `effects(async)` fn from a sync context is a type error
 - Compatible with `task<T>`: `spawn { async_fn() }` bridges the two models
 
-### M10.3 — Expanded hardware effects for inference stacks
+### M10.3 — Expanded hardware effects for inference stacks ✓ DONE
 
-Wire the existing effects vocabulary to concrete hardware tiers, motivated by Dynamo's
-disaggregated architecture where components must prove they only touch their assigned tier:
+`gpu`, `net`, `storage`, `mem`, `async` registered in `KnownEffects`; unknown effect names
+produce a compiler warning. All hardware tiers are now recognized and subset-checked.
+Motivated by Dynamo's disaggregated architecture where components must prove they only touch their assigned tier:
 
 ```candor
 effects(gpu)     ## CUDA/VRAM access — prefill/decode compute workers
@@ -361,7 +363,7 @@ Medium ─── M6.2   SMT integration (Z3 / CVC5)
            M7.3   Effects as capability tokens (cap<gpu>, cap<net>, cap<mem>)
            M8.1   Package registry
            M10.1  task<T> / spawn structured concurrency
-           M10.3  Expanded hardware effects (gpu, net, storage, mem)
+           M10.3  Expanded hardware effects (gpu, net, storage, mem)  ✓ DONE
            M10.4  Stdlib: heap<T>, arena<T>, trie<K,V>
 
 Far   ──── M6.4   forall / exists runtime + solver

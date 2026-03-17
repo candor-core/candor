@@ -1640,3 +1640,59 @@ fn make_node(v: i64) -> Node {
 		t.Fatal(err)
 	}
 }
+
+// ── M10.3: hardware effect tiers ─────────────────────────────────────────────
+
+func TestEffectsGpu(t *testing.T) {
+	mustCompile(t, `fn kern() -> unit effects(gpu) { return unit }`)
+}
+
+func TestEffectsNet(t *testing.T) {
+	mustCompile(t, `fn xfer() -> unit effects(net) { return unit }`)
+}
+
+func TestEffectsStorage(t *testing.T) {
+	mustCompile(t, `fn spill() -> unit effects(storage) { return unit }`)
+}
+
+func TestEffectsMem(t *testing.T) {
+	mustCompile(t, `fn evict() -> unit effects(mem) { return unit }`)
+}
+
+func TestEffectsAsync(t *testing.T) {
+	mustCompile(t, `fn launch() -> unit effects(async) { return unit }`)
+}
+
+func TestEffectsMultiHardware(t *testing.T) {
+	// Combined hardware effects — prefill→decode KV transfer
+	mustCompile(t, `
+fn transfer() -> unit effects(gpu, net) { return unit }
+fn run() -> unit effects(gpu, net) { transfer() return unit }
+`)
+}
+
+func TestEffectsHardwareSubsetViolation(t *testing.T) {
+	// effects(net) cannot call effects(gpu)
+	mustFail(t, `
+fn kern() -> unit effects(gpu) { return unit }
+fn route() -> unit effects(net) { kern() return unit }
+`, "cannot call")
+}
+
+func TestEffectsUnknownNameWarns(t *testing.T) {
+	// Unrecognized effect name should produce a warning, not an error
+	res, err := compile(`fn f() -> unit effects(typo_effect) { return unit }`)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	found := false
+	for _, w := range res.Warnings {
+		if strings.Contains(w.Msg, "unknown effect") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("expected 'unknown effect' warning for unrecognized effect name")
+	}
+}

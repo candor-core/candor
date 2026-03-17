@@ -699,6 +699,36 @@ var Builtins = map[string]*FnType{
 	"path_remove":   {Params: []Type{TStr}, Ret: &GenType{Con: "result", Params: []Type{TUnit, TStr}}},
 }
 
+// KnownEffects is the canonical set of recognized effect names.
+// Using an unrecognized name produces a warning (typo guard).
+// New effect tiers should be added here alongside documentation.
+var KnownEffects = map[string]bool{
+	// I/O and system
+	"io":      true, // file, stdin/stdout, network sockets
+	"sys":     true, // process control, environment, exit
+	"time":    true, // wall clock, monotonic clock, sleep
+	"rand":    true, // random number generation
+	// Async / concurrency (M10)
+	"async":   true, // suspendable / coroutine-style execution
+	// Hardware tiers (M10.3) — motivated by disaggregated inference stacks
+	"gpu":     true, // CUDA/VRAM access — prefill/decode compute workers
+	"net":     true, // NIXL / InfiniBand / RoCE / NVLink transfers
+	"storage": true, // SSD / object store (S3, VAST) — KV cache spill
+	"mem":     true, // CPU RAM management — KV block manager, eviction logic
+}
+
+// warnUnknownEffects emits a warning for any effect name not in KnownEffects.
+func (c *checker) warnUnknownEffects(ann *parser.EffectsAnnotation, tok lexer.Token) {
+	if ann == nil || ann.Kind != parser.EffectsDecl {
+		return
+	}
+	for _, name := range ann.Names {
+		if !KnownEffects[name] {
+			c.warnf(tok, "unknown effect %q; known effects: io, sys, time, rand, async, gpu, net, storage, mem", name)
+		}
+	}
+}
+
 // BuiltinEffects records the known effects of built-in functions.
 // The print_* family performs I/O, so they carry effects(io).
 var BuiltinEffects = map[string]*parser.EffectsAnnotation{
@@ -782,6 +812,7 @@ func (c *checker) checkFile(file *parser.File) error {
 				c.fnDecls[d.Name.Lexeme] = d
 				if d.Effects != nil {
 					c.fnEffects[d.Name.Lexeme] = d.Effects
+					c.warnUnknownEffects(d.Effects, d.Name)
 				}
 			}
 		case *parser.StructDecl:
@@ -808,6 +839,7 @@ func (c *checker) checkFile(file *parser.File) error {
 			c.fnSigs[d.Name.Lexeme] = &FnType{Params: params, Ret: ret}
 			if d.Effects != nil {
 				c.fnEffects[d.Name.Lexeme] = d.Effects
+				c.warnUnknownEffects(d.Effects, d.Name)
 			}
 			c.externFns[d.Name.Lexeme] = true
 		case *parser.ConstDecl:
