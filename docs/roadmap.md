@@ -209,7 +209,10 @@ Implemented incrementally; each phase verified by `TestM9TypeckSource`.
 `ty_show`/`ty_eq`/`ty_coerce`, `ScopeStack` (linked-list scopes via `map<str,Type>`),
 `TypeEnv` (struct/enum/fn registries + error/warning accumulators), `resolve_type` (TypeExpr → Type).
 
-**Phase 2** (next): signature collection pass — register all struct/enum/fn declarations into TypeEnv.
+**Phase 2 ✓** (714 lines): Two-pass signature collection — all struct/enum/fn/extern declarations
+registered into `TypeEnv`; forward-reference safe (names registered before types resolved).
+Key pattern: `must{}` block arms are always `unit`; typed returns require bare single-expression
+arms or dedicated helper functions. `none_type_opt()` helper resolves `option<T>` arm type unification.
 **Phase 3**: expression type inference.
 **Phase 4**: statement + declaration checking.
 **Phase 5**: file-level entry point + full integration.
@@ -321,18 +324,57 @@ fn evict_lru(cache: refmut<KVCache>, needed: i64, _: cap<mem>) -> i64
 A Dynamo routing component that holds `cap<net>` but not `cap<gpu>` cannot accidentally
 call a CUDA kernel — the type system rejects it at compile time.
 
-### M10.4 — Stdlib: `heap<T>`, `arena<T>`, `trie<K, V>`
+### M10.4 — Shared ownership types + inference stdlib
 
-Inference serving needs data structures not in the current stdlib:
+#### `arc<T>` — atomic reference-counted shared ownership
 
-| Type | Primary use in Dynamo-style systems |
-|------|-------------------------------------|
-| `heap<T>` (min/max priority queue) | SLA-driven request scheduling; route highest-priority request first |
-| `arena<T>` | Slab allocator; all KV blocks for one request lifetime freed atomically |
+The ownership model is incomplete without shared ownership. `box<T>` (single owner) cannot
+express two concurrent decode workers reading the same prefill KV page, or multiple query
+workers holding a reference to the same HNSW index shard.
+
+```candor
+arc_new(val: T)              -> arc<T>   ## allocate; refcount = 1
+arc_clone(a: ref<arc<T>>)    -> arc<T>   ## atomic increment; O(1)
+arc_deref(a: ref<arc<T>>)    -> ref<T>   ## borrow inner value
+## drop decrements atomically; frees when count reaches 0
+```
+
+Canonical use — shared KV page in a radix tree:
+```candor
+struct KVPage { tokens: vec<i64>, data: arc<tensor<f16>>, layer: i64 }
+struct RadixNode {
+    children: map<i64, box<RadixNode>>
+    page:     option<arc<KVPage>>      ## multiple decoders share; no copy
+}
+```
+
+#### `pin<T>` — non-movable allocation (CUDA / DMA)
+
+CUDA requires host buffers registered for zero-copy DMA to stay at a fixed physical address.
+`pin<T>` is non-movable: the compiler rejects passing it by value; only `ref<pin<T>>` borrows
+are permitted. Under the hood, `pin_new` calls `cudaMallocHost` or equivalent.
+
+```candor
+pin_new(val: T)          -> pin<T>      effects(gpu, mem)
+pin_deref(p: ref<pin<T>>) -> ref<T>
+pin_addr(p: ref<pin<T>>) -> u64         ## raw address for FFI / NIXL registration
+## drop calls cudaFreeHost
+```
+
+#### Inference-serving stdlib types
+
+| Type | Primary use |
+|------|-------------|
+| `heap<T>` (min/max priority queue) | SLA-driven request scheduling |
+| `arena<T>` | Slab allocator; all KV blocks for one request freed atomically |
 | `trie<K, V>` | Radix-tree prefix matching for KV cache overlap scoring |
+| `weak<T>` | Weak reference to `arc<T>`; does not prevent deallocation (cache eviction) |
 
 `arena<T>` pairs with the capability model: `cap<arena>` is handed to a request handler;
 dropping the cap frees all arena-allocated blocks without tracing individual pointers.
+
+`weak<T>` is essential for the KV radix tree: cache entries hold `weak<KVPage>` so an
+eviction manager can free a page even while the tree still has a node referencing it.
 
 ### M10.5 — `#[dynamo_endpoint]` annotation
 
@@ -351,6 +393,196 @@ signature and annotations. The OpenAI-compatible frontend is auto-wired.
 
 ---
 
+---
+
+## M11 — Tensor & ML Primitives
+
+> Goal: make Candor a first-class language for ML inference workloads — not by bundling
+> a framework, but by giving the core the primitives that frameworks are built on.
+> `f16`/`bf16`, `tensor<T>`, and SIMD intrinsics belong in core because they affect
+> codegen, ABI, and memory layout. Implementations live in `std/`.
+
+### M11.1 — `f16` and `bf16` primitive types
+
+Modern embedding vectors and KV caches use half-precision storage. These are not library
+types — they need dedicated LLVM IR types (`half`, `bfloat`), arithmetic promotion rules
+(operations widen to `f32`), and literal syntax.
+
+```candor
+let v: f16  = 1.5h16          ## half-precision literal
+let w: bf16 = 1.5bf16         ## bfloat16 literal
+## arithmetic: f16 + f16 → f32 (auto-promoted); explicit cast to narrow
+```
+
+Without these, a Candor program cannot represent an embedding vector or KV cache tensor
+in the native format that CUDA kernels expect — forcing lossy f32 upcasting everywhere.
+
+### M11.2 — `tensor<T>` builtin type
+
+Multi-dimensional dense array with runtime shape and strides. Differs from `vec<T>` in
+that it is N-dimensional, supports non-contiguous views (slices, transposes), and its
+layout is ABI-visible so CUDA extern fn bindings know the stride.
+
+```candor
+## shape is runtime; layout defaults to row-major C order
+let emb: tensor<f16> = tensor_zeros([batch, seq_len, d_model])
+let kv:  tensor<f16> = tensor_zeros([n_layers, 2, n_heads, seq_len, head_dim])
+
+## strided view — zero copy, shares backing allocation
+let layer0: tensor<f16> = tensor_slice(kv, [0, .., .., .., ..])
+
+## CUDA kernel call — tensor ABI passes (ptr, shape, strides)
+extern fn cuda_attn(q: ref<tensor<f16>>, k: ref<tensor<f16>>,
+                    v: ref<tensor<f16>>, out: refmut<tensor<f16>>) -> unit effects(gpu)
+```
+
+Key design:
+- `tensor<T>` owns its flat `vec<T>` storage (or borrows via `ref<tensor<T>>`)
+- `arc<tensor<T>>` is the shared-ownership form for KV cache pages
+- `pin<tensor<T>>` is the DMA-registered form for NIXL zero-copy transfers
+- Shape/stride metadata lives adjacent to the data pointer (fat pointer ABI)
+
+### M11.3 — SIMD distance intrinsics
+
+Dot product, L2 norm, and cosine similarity are the three operations every vector DB
+and attention mechanism reduces to. Making them compiler intrinsics (not extern fn) lets
+the LLVM backend emit vectorized `llvm.fmuladd` / `llvm.experimental.vector.reduce.add`
+and auto-select AVX-512 / NEON / WASM SIMD without the user writing platform-specific code.
+
+```candor
+fn vec_dot(a: ref<tensor<f32>>, b: ref<tensor<f32>>) -> f32 pure effects(simd)
+fn vec_l2(a: ref<tensor<f32>>) -> f32 pure effects(simd)
+fn vec_cosine(a: ref<tensor<f32>>, b: ref<tensor<f32>>) -> f32 pure effects(simd)
+fn tensor_matmul(a: ref<tensor<f32>>, b: ref<tensor<f32>>,
+                 out: refmut<tensor<f32>>) -> unit effects(simd)
+```
+
+`effects(simd)` documents that the operation uses SIMD width; it is always `pure`
+(no I/O side effects) and its presence tells the effects checker it may not run on
+hardware without SIMD support.
+
+### M11.4 — `std/tensor.cnd` — shape arithmetic, broadcast, reshape
+
+Pure Candor implementations of the tensor ops the compiler doesn't intrinsify:
+
+- `tensor_reshape`, `tensor_transpose`, `tensor_broadcast_to`
+- `tensor_cat`, `tensor_stack`, `tensor_split` (concatenation along a dimension)
+- `tensor_to_vec` / `tensor_from_vec` bridges for interop with existing `vec<T>` code
+- Softmax, layer-norm, ReLU/GELU activation fns (pure, `effects(simd)`)
+
+### M11.5 — `std/vecdb.cnd` — HNSW and IVF indexes in pure Candor
+
+Vector database index structures implemented in Candor using `arc<T>` and `tensor<T>`:
+
+```candor
+## HNSW (Hierarchical Navigable Small World) — approximate nearest neighbor
+struct HnswNode {
+    id:          i64
+    vec:         arc<tensor<f16>>     ## shared — multiple layers reference same vec
+    neighbors:   vec<vec<i64>>        ## per-layer neighbor lists
+}
+struct HnswIndex { nodes: vec<arc<HnswNode>>, ef_construction: i64, M: i64 }
+
+fn hnsw_insert(idx: refmut<HnswIndex>, vec: tensor<f16>, id: i64) -> unit
+fn hnsw_search(idx: ref<HnswIndex>, query: ref<tensor<f16>>, k: i64) -> vec<i64>
+
+## IVF (Inverted File Index) — coarse quantization + refine
+struct IvfIndex { centroids: tensor<f32>, lists: vec<vec<i64>> }
+fn ivf_search(idx: ref<IvfIndex>, query: ref<tensor<f32>>, nprobe: i64, k: i64) -> vec<i64>
+```
+
+The `arc<HnswNode>` means multiple concurrent queries can walk the graph simultaneously
+with no locking on reads — each query holds its own `arc` clone for the duration.
+
+---
+
+## M12 — Advanced Storage Layer
+
+> Goal: Candor programs that manage multi-tier storage (GPU VRAM → CPU RAM → NVMe → object
+> store) should be able to express tier-crossing operations as type-safe, effect-annotated
+> code — not raw pointer arithmetic. Motivated by Dynamo's disaggregated KV store.
+
+### M12.1 — `mmap<T>` — memory-mapped file allocation
+
+Large HNSW indexes (50–500 GB), embedding databases, and KV cache spill files exceed
+heap capacity. `mmap<T>` is a file-backed allocation owned by the OS page cache:
+
+```candor
+## open or create a memory-mapped region backed by a file
+fn mmap_open(path: str, byte_len: u64) -> result<mmap<u8>, str> effects(storage)
+fn mmap_deref(m: ref<mmap<T>>) -> ref<T>
+fn mmap_flush(m: ref<mmap<T>>) -> unit effects(storage)
+## drop calls msync + munmap
+```
+
+The compiler ensures `mmap<T>` cannot be moved (like `pin<T>`) since the OS mapping is
+tied to the address. An HNSW index deserialized from disk becomes `mmap<HnswIndex>` —
+operating directly on mapped memory without a heap copy.
+
+### M12.2 — Column store primitives (`std/colstore.cnd`)
+
+Embedding batches, token sequences, and KV cache metadata are naturally columnar — storing
+all embeddings in one flat tensor and all token IDs in another is more cache-efficient than
+interleaved row structs. `std/colstore.cnd` provides:
+
+```candor
+## Arrow-compatible column layout — each field is a contiguous typed buffer
+struct ColBatch {
+    row_count: i64
+    columns:   map<str, tensor<u8>>    ## type-erased; cast at read time
+}
+fn col_get<T>(batch: ref<ColBatch>, name: str) -> ref<tensor<T>>
+fn col_put<T>(batch: refmut<ColBatch>, name: str, data: tensor<T>) -> unit
+```
+
+This is the native format for passing embedding batches to CUDA kernels and for
+serializing KV cache metadata to NVMe. Effect annotation: `effects(storage)` on
+any `ColBatch` operation that touches a `mmap`-backed column.
+
+### M12.3 — `std/nixl.cnd` — NIXL zero-copy transfer bindings
+
+NVIDIA NIXL (Inference Transfer Library) enables zero-copy GPU↔CPU↔NVMe transfers
+over RDMA (InfiniBand / RoCE) for disaggregated prefill→decode KV migration.
+These bindings follow the same pattern as `src/std/wasm.cnd` — pure `extern fn`
+declarations with effect annotations; no NIXL dependency in Candor core.
+
+```candor
+## std/nixl.cnd — wire at link time: link against libnixl.so
+## Only needed for --target that includes NIXL disaggregation.
+
+## Register a pin<tensor<T>> buffer for NIXL zero-copy DMA
+extern fn nixl_register(ptr: u64, byte_len: u64, mem_type: i32) -> u64
+    effects(mem, gpu)
+
+## Initiate async zero-copy transfer between registered handles
+extern fn nixl_transfer(src: u64, dst: u64, src_off: u64,
+                        dst_off: u64, byte_len: u64) -> u64
+    effects(async, gpu, net)
+
+## Poll a pending transfer (integrates with effects(async) await)
+extern fn nixl_poll(transfer_id: u64) -> i32  effects(async)
+
+## Disaggregated KV: send one layer's KV block from prefill to decode node
+extern fn nixl_send_kv(src: u64, remote_rank: i32,
+                       layer: i32, head: i32) -> u64  effects(async, gpu, net)
+
+extern fn nixl_deregister(handle: u64) -> unit  effects(mem, gpu)
+```
+
+### M12.4 — `std/kvcache.cnd` — radix-tree KV cache in pure Candor
+
+Built on `arc<T>`, `pin<tensor<f16>>`, `std/nixl.cnd`, and `effects(async, gpu, mem)` —
+a production-quality KV cache with:
+
+- Radix tree for prefix deduplication across concurrent requests
+- `arc<KVPage>` so multiple decode workers share prefill pages without copying
+- `weak<KVPage>` in tree nodes so the eviction manager can free pages without dangling refs
+- Multi-tier eviction: GPU VRAM → CPU RAM → NVMe → object store, each tier annotated
+  with its effect (gpu / mem / storage / net)
+- NIXL integration for migrating KV blocks between disaggregated prefill and decode nodes
+
+---
+
 ## Milestone Timeline (rough order, not calendar-bound)
 
 ```
@@ -363,9 +595,10 @@ Done  ──── v0.1   Core language, C backend, closures, effects, contracts
            M5.2   Debug / release builds
            M5.3   Sanitizer integration
 
-Near  ──── M5.5   WebAssembly target
+Near  ──── M5.5   WebAssembly target  ✓ DONE
            M6.1   Symbolic contract evaluation (extend ComptimeValues)
            M8.2   C/C++ / CUDA header interop  ← reprioritized (Dynamo GPU FFI)
+           M10.4  arc<T>, pin<T>, weak<T> + inference stdlib  ← new priority
 
 Medium ─── M6.2   SMT integration (Z3 / CVC5)
            M6.3   Refinement types
@@ -374,8 +607,12 @@ Medium ─── M6.2   SMT integration (Z3 / CVC5)
            M7.3   Effects as capability tokens (cap<gpu>, cap<net>, cap<mem>)
            M8.1   Package registry
            M10.1  task<T> / spawn structured concurrency
-           M10.3  Expanded hardware effects (gpu, net, storage, mem)  ✓ DONE
-           M10.4  Stdlib: heap<T>, arena<T>, trie<K,V>
+           M10.3  Expanded hardware effects  ✓ DONE
+           M11.1  f16 / bf16 primitive types
+           M11.2  tensor<T> builtin type
+           M11.3  SIMD distance intrinsics (vec_dot, vec_l2, vec_cosine)
+           M12.1  mmap<T> memory-mapped file allocation
+           M12.3  std/nixl.cnd — NIXL zero-copy transfer bindings
 
 Far   ──── M6.4   forall / exists runtime + solver
            M7.4   export_json codegen
@@ -388,6 +625,10 @@ Far   ──── M6.4   forall / exists runtime + solver
            M9.6   C code generator in Candor
            M10.2  effects(async) — compiler state machine lowering
            M10.5  #[dynamo_endpoint] annotation + DGDR codegen
+           M11.4  std/tensor.cnd — shape arithmetic, broadcast, reshape
+           M11.5  std/vecdb.cnd — HNSW + IVF in pure Candor
+           M12.2  std/colstore.cnd — columnar batch storage
+           M12.4  std/kvcache.cnd — radix-tree KV cache (arc<T> + NIXL)
 
 Goal  ──── M9.7   Stage 1 bootstrap (Go candorc compiles Candor compiler)
            M9.8   Stage 2 bootstrap (Candor compiler compiles itself)
@@ -399,15 +640,22 @@ Goal  ──── M9.7   Stage 1 bootstrap (Go candorc compiles Candor compiler
 
 | Item | Difficulty | Impact |
 |------|------------|--------|
-| `task<T>` / `spawn` concurrency (M10.1) | High | Very high — unlocks async inference pipelines |
+| `arc<T>` + `pin<T>` + `weak<T>` (M10.4) | Medium | Critical — required for KV cache sharing, NIXL |
+| `f16` / `bf16` primitive types (M11.1) | Low | Very high — ML workloads can't express embeddings without it |
+| `tensor<T>` builtin type (M11.2) | High | Very high — foundational for all ML data movement |
 | C/CUDA header interop (M8.2) | Medium | Very high — GPU FFI for Dynamo/TRT/vLLM |
-| Expanded hardware effects (M10.3) | Low | High — ties effects system to real hardware tiers |
+| `task<T>` / `spawn` concurrency (M10.1) | High | Very high — async inference pipelines |
+| `effects(async)` state machine (M10.2) | Very high | Very high — deep async integration |
+| SIMD distance intrinsics (M11.3) | Medium | High — vec_dot/cosine perf without AVX boilerplate |
+| `std/nixl.cnd` NIXL bindings (M12.3) | Medium | High — zero-copy disaggregated KV transfer |
+| `mmap<T>` memory-mapped files (M12.1) | Medium | High — large index support without heap copy |
 | Capability tokens `cap<T>` (M7.3) | Medium | High — compile-time hardware tier enforcement |
 | Symbolic contract eval (M6.1) | Medium | High — improves correctness guarantees |
 | MCP tool annotations (M7.1) | Medium | High — unlocks AI agent tooling |
 | Package registry (M8.1) | High | Very high — unlocks ecosystem growth |
-| `heap<T>`, `arena<T>`, `trie<K,V>` stdlib (M10.4) | Medium | High — inference scheduling primitives |
-| `effects(async)` state machine (M10.2) | Very high | Very high — deep async integration |
+| `heap<T>`, `arena<T>`, `trie<K,V>`, `weak<T>` stdlib (M10.4) | Medium | High — inference scheduling |
+| `std/vecdb.cnd` HNSW + IVF (M11.5) | High | High — native vector DB without FAISS dep |
+| `std/kvcache.cnd` radix KV cache (M12.4) | High | Very high — complete Dynamo KV layer |
 | SMT integration (M6.2) | Very high | Medium — research milestone |
 
 ---
