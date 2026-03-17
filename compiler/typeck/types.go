@@ -39,8 +39,10 @@ var (
 	TU64  = &Prim{"u64"}
 	TU128 = &Prim{"u128"}
 
-	TF32 = &Prim{"f32"}
-	TF64 = &Prim{"f64"}
+	TF16  = &Prim{"f16"}
+	TBF16 = &Prim{"bf16"}
+	TF32  = &Prim{"f32"}
+	TF64  = &Prim{"f64"}
 
 	// Sentinels for unresolved literals. Never appear in a fully-checked AST.
 	TIntLit   = &Prim{"<int_lit>"}
@@ -52,7 +54,7 @@ var BuiltinTypes = map[string]Type{
 	"unit": TUnit, "never": TNever, "bool": TBool, "str": TStr,
 	"i8": TI8, "i16": TI16, "i32": TI32, "i64": TI64, "i128": TI128,
 	"u8": TU8, "u16": TU16, "u32": TU32, "u64": TU64, "u128": TU128,
-	"f32": TF32, "f64": TF64,
+	"f16": TF16, "bf16": TBF16, "f32": TF32, "f64": TF64,
 }
 
 // ── Type variable ─────────────────────────────────────────────────────────────
@@ -246,7 +248,11 @@ func IsFloatType(t Type) bool {
 	if !ok {
 		return false
 	}
-	return p.name == "f32" || p.name == "f64"
+	switch p.name {
+	case "f16", "bf16", "f32", "f64":
+		return true
+	}
+	return false
 }
 
 func IsNumericType(t Type) bool { return IsIntType(t) || IsFloatType(t) }
@@ -255,7 +261,12 @@ func IsNumericType(t Type) bool { return IsIntType(t) || IsFloatType(t) }
 //
 //	i8(0) < i16(1) < i32(2) < i64(3) < i128(4)
 //	u8(10) < u16(11) < u32(12) < u64(13) < u128(14)
-//	f32(20) < f64(21)
+//	f16(20) < bf16(21) < f32(22) < f64(23)
+//
+// Note: f16 and bf16 are in the same rank family (20s) but bf16 is not
+// losslessly wider than f16 (different mantissa/exponent split), so widening
+// between them is not implicit. They share the family index so IsNumericWider
+// correctly rejects cross-format widening.
 //
 // Returns -1 for non-widening types.
 func numericRank(t Type) int {
@@ -274,8 +285,10 @@ func numericRank(t Type) int {
 	case "u32":  return 12
 	case "u64":  return 13
 	case "u128": return 14
-	case "f32":  return 20
-	case "f64":  return 21
+	case "f16":  return 20
+	case "bf16": return 21
+	case "f32":  return 22
+	case "f64":  return 23
 	}
 	return -1
 }

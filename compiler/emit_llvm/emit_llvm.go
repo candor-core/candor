@@ -11,6 +11,8 @@
 //	i16/u16           → i16
 //	i32/u32           → i32
 //	i64/u64           → i64
+//	f16               → half
+//	bf16              → bfloat
 //	f32               → float
 //	f64               → double
 //	str               → ptr
@@ -159,6 +161,10 @@ func (em *llEmitter) llType(t typeck.Type) string {
 		return "i64"
 	case typeck.TI128, typeck.TU128:
 		return "i128"
+	case typeck.TF16:
+		return "half" // LLVM IEEE 754 half-precision
+	case typeck.TBF16:
+		return "bfloat" // LLVM brain float 16
 	case typeck.TF32:
 		return "float"
 	case typeck.TF64:

@@ -4410,6 +4410,10 @@ func (e *emitter) cType(t typeck.Type) (string, error) {
 		return "uint64_t", nil
 	case typeck.TU128:
 		return "unsigned __int128", nil
+	case typeck.TF16:
+		return "_Float16", nil // IEEE 754 half-precision; requires GCC/Clang >= 12
+	case typeck.TBF16:
+		return "__bf16", nil // Brain float 16; requires GCC >= 13 or Clang >= 15
 	case typeck.TF32:
 		return "float", nil
 	case typeck.TF64:

@@ -1713,6 +1713,64 @@ fn make_shared(v: i64) -> Shared {
 	}
 }
 
+// ── M11.1: f16 / bf16 primitive float types ───────────────────────────────────
+
+func TestF16Literal(t *testing.T) {
+	// Float literal coerces to f16
+	mustCompile(t, `fn f() -> f16 { return 1.5 }`)
+}
+
+func TestBF16Literal(t *testing.T) {
+	mustCompile(t, `fn f() -> bf16 { return 3.14 }`)
+}
+
+func TestF16Variable(t *testing.T) {
+	mustCompile(t, `fn f() -> unit { let x: f16 = 0.5 return unit }`)
+}
+
+func TestBF16Variable(t *testing.T) {
+	mustCompile(t, `fn f() -> unit { let x: bf16 = 0.25 return unit }`)
+}
+
+func TestF16Arithmetic(t *testing.T) {
+	mustCompile(t, `fn f(a: f16, b: f16) -> f16 { return a + b }`)
+}
+
+func TestBF16Arithmetic(t *testing.T) {
+	mustCompile(t, `fn f(a: bf16, b: bf16) -> bf16 { return a * b }`)
+}
+
+func TestF16InStruct(t *testing.T) {
+	mustCompile(t, `
+struct HalfVec { x: f16, y: f16, z: f16 }
+fn dot(a: ref<HalfVec>, b: ref<HalfVec>) -> f16 {
+	return a.x * b.x + a.y * b.y + a.z * b.z
+}`)
+}
+
+func TestBF16InArc(t *testing.T) {
+	// arc<bf16> — shared ML weight storage
+	mustCompile(t, `fn f() -> unit {
+		let w: arc<bf16> = arc_new(0.5)
+		arc_drop(w)
+		return unit
+	}`)
+}
+
+func TestF16WideningToF32(t *testing.T) {
+	// f16 does NOT implicitly widen to f32 (different exponent range from bf16)
+	// but it does widen to f32 since rank(f16)=20 < rank(f32)=22, same family
+	mustCompile(t, `fn f(x: f16) -> f32 { return x }`)
+}
+
+func TestF16WideningToF64(t *testing.T) {
+	mustCompile(t, `fn f(x: f16) -> f64 { return x }`)
+}
+
+func TestBF16WideningToF32(t *testing.T) {
+	mustCompile(t, `fn f(x: bf16) -> f32 { return x }`)
+}
+
 // ── M10.3: hardware effect tiers ─────────────────────────────────────────────
 
 func TestEffectsGpu(t *testing.T) {
