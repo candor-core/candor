@@ -326,6 +326,8 @@ The most valuable contributions right now are:
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
+The full development roadmap — including upcoming milestones, bootstrapping plan, and long-term vision — lives at **[docs/roadmap.md](docs/roadmap.md)**.
+
 ---
 
 ## Project Structure

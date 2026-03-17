@@ -127,9 +127,10 @@ struct Config { name: str, limit: i64, tags: vec<str> }
 - `candorc fetch` downloads and pins to `Candor.lock`
 - Local cache at `~/.candor/pkg/`; hosted registry at `candorpkg.io` (future)
 
-### M8.2 — C/C++ interop improvements
+### M8.2 — C/C++ interop improvements *(reprioritized: Medium)*
 - `#[c_header("foo.h")]` auto-generates `extern fn` stubs from a C header
 - Struct layout compatibility guarantee for plain-old-data types
+- CUDA runtime header support: enables Candor code running in GPU inference stacks (NVIDIA Dynamo, TensorRT-LLM, vLLM) to call CUDA APIs directly without hand-written `extern fn` declarations
 
 ### M8.3 — Documentation generator
 - `candorc doc --html` generates HTML reference from `///` doc comments
@@ -225,6 +226,118 @@ for day-to-day Candor development.
 
 ---
 
+## M10 — Async / Concurrency
+
+> Goal: structured concurrency with effect-tracked async operations, motivated by
+> disaggregated inference architectures like NVIDIA Dynamo where prefill→decode KV
+> transfers, multi-tier memory management, and request scheduling are fundamentally async.
+
+### Design philosophy
+
+Candor's effects system extends naturally to async. A function that suspends is just a
+function with `effects(async)` — the compiler generates a state machine, not callback soup.
+Capability tokens (M7.3) let the borrow checker prove which hardware tier each async task
+touches, preventing data races across GPU/CPU/network boundaries at compile time.
+
+### M10.1 — `task<T>` and `spawn` blocks
+
+The first, simpler step: a first-class future type backed by a thread pool or event loop.
+
+```candor
+fn fetch_row(db: ref<DB>, id: i64) -> task<result<Row, str>>
+    effects(io)
+{
+    return spawn { db_query(db, id) }
+}
+
+fn run() -> unit effects(io) {
+    let t1 = fetch_row(db, 1)
+    let t2 = fetch_row(db, 2)
+    let r1 = t1.join() must { ok(r) => r   err(e) => ... }
+    let r2 = t2.join() must { ok(r) => r   err(e) => ... }
+}
+```
+
+- `spawn { expr }` launches a task; returns `task<T>` where T is the type of `expr`
+- `.join()` blocks the calling task until completion; returns `result<T, str>`
+- `task::select(vec<task<T>>)` — returns the first completed task (for timeout patterns)
+- Tasks inherit the effects of the spawning scope; no implicit capability laundering
+
+### M10.2 — `effects(async)` — compiler-generated state machines
+
+The deeper integration: `async fn` with compiler-lowered continuations. No heap allocation
+per suspension point; the compiler allocates a fixed-size frame on the arena.
+
+```candor
+fn transfer_kv_block(src: ref<GPUBuffer>, dst: refmut<GPUBuffer>) -> unit
+    effects(async, gpu, net)
+{
+    let handle = nixl_post_transfer(src, dst)    ## non-blocking post
+    await handle                                  ## yield; resume on completion
+    nixl_verify(handle)
+}
+```
+
+- `await expr` is only valid inside `effects(async)` functions
+- `await` desugars to a compiler-managed suspend/resume; no `async`/`await` keyword sprawl
+- The effect propagates: calling an `effects(async)` fn from a sync context is a type error
+- Compatible with `task<T>`: `spawn { async_fn() }` bridges the two models
+
+### M10.3 — Expanded hardware effects for inference stacks
+
+Wire the existing effects vocabulary to concrete hardware tiers, motivated by Dynamo's
+disaggregated architecture where components must prove they only touch their assigned tier:
+
+```candor
+effects(gpu)     ## CUDA/VRAM access — prefill/decode compute workers
+effects(net)     ## NIXL / InfiniBand / RoCE transfers — KV block migration
+effects(storage) ## SSD / object store (S3, VAST) — KV cache spill
+effects(mem)     ## CPU RAM — KV block manager, eviction policy logic
+```
+
+Combined with M7.3 capability tokens:
+
+```candor
+fn evict_lru(cache: refmut<KVCache>, needed: i64, _: cap<mem>) -> i64
+    requires  needed > 0
+    ensures   return >= 0
+    effects(mem)
+{ ... }
+```
+
+A Dynamo routing component that holds `cap<net>` but not `cap<gpu>` cannot accidentally
+call a CUDA kernel — the type system rejects it at compile time.
+
+### M10.4 — Stdlib: `heap<T>`, `arena<T>`, `trie<K, V>`
+
+Inference serving needs data structures not in the current stdlib:
+
+| Type | Primary use in Dynamo-style systems |
+|------|-------------------------------------|
+| `heap<T>` (min/max priority queue) | SLA-driven request scheduling; route highest-priority request first |
+| `arena<T>` | Slab allocator; all KV blocks for one request lifetime freed atomically |
+| `trie<K, V>` | Radix-tree prefix matching for KV cache overlap scoring |
+
+`arena<T>` pairs with the capability model: `cap<arena>` is handed to a request handler;
+dropping the cap frees all arena-allocated blocks without tracing individual pointers.
+
+### M10.5 — `#[dynamo_endpoint]` annotation
+
+Extends M7.1 (MCP tool annotations) to emit NVIDIA Dynamo deployment descriptors:
+
+```candor
+#[dynamo_endpoint(model = "deepseek-r1", priority = HIGH, phase = DECODE)]
+fn decode_step(kv: ref<KVBlock>, tokens: vec<i64>) -> result<vec<i64>, str>
+    effects(gpu, async)
+{ ... }
+```
+
+`candorc dynamo` emits a `DynamoGraphDeploymentRequest` YAML that registers the function
+as a Dynamo worker, with phase, resource requirements, and SLA derived from the type
+signature and annotations. The OpenAI-compatible frontend is auto-wired.
+
+---
+
 ## Milestone Timeline (rough order, not calendar-bound)
 
 ```
@@ -239,17 +352,20 @@ Done  ──── v0.1   Core language, C backend, closures, effects, contracts
 
 Near  ──── M5.5   WebAssembly target
            M6.1   Symbolic contract evaluation (extend ComptimeValues)
+           M8.2   C/C++ / CUDA header interop  ← reprioritized (Dynamo GPU FFI)
 
 Medium ─── M6.2   SMT integration (Z3 / CVC5)
            M6.3   Refinement types
            M7.1   MCP tool annotations
            M7.2   Semantic context embedding
+           M7.3   Effects as capability tokens (cap<gpu>, cap<net>, cap<mem>)
            M8.1   Package registry
+           M10.1  task<T> / spawn structured concurrency
+           M10.3  Expanded hardware effects (gpu, net, storage, mem)
+           M10.4  Stdlib: heap<T>, arena<T>, trie<K,V>
 
 Far   ──── M6.4   forall / exists runtime + solver
-           M7.3   Effects as capability tokens
            M7.4   export_json codegen
-           M8.2   C/C++ header interop
            M8.3   Doc generator
            M9.1   vec::push / growable collections in LLVM  ✓ DONE
            M9.2   box<T> recursive heap types  ✓ DONE
@@ -257,6 +373,8 @@ Far   ──── M6.4   forall / exists runtime + solver
            M9.4   Candor parser in Candor  ✓ DONE
            M9.5   Type checker in Candor
            M9.6   C code generator in Candor
+           M10.2  effects(async) — compiler state machine lowering
+           M10.5  #[dynamo_endpoint] annotation + DGDR codegen
 
 Goal  ──── M9.7   Stage 1 bootstrap (Go candorc compiles Candor compiler)
            M9.8   Stage 2 bootstrap (Candor compiler compiles itself)
@@ -268,12 +386,15 @@ Goal  ──── M9.7   Stage 1 bootstrap (Go candorc compiles Candor compiler
 
 | Item | Difficulty | Impact |
 |------|------------|--------|
-| `vec::push` in LLVM backend (M9.1) | Medium | Very high — unlocks bootstrapping path |
-| Cross-compilation `--target` (M5.4) | Low | High — just pass the triple through |
+| `task<T>` / `spawn` concurrency (M10.1) | High | Very high — unlocks async inference pipelines |
+| C/CUDA header interop (M8.2) | Medium | Very high — GPU FFI for Dynamo/TRT/vLLM |
+| Expanded hardware effects (M10.3) | Low | High — ties effects system to real hardware tiers |
+| Capability tokens `cap<T>` (M7.3) | Medium | High — compile-time hardware tier enforcement |
 | Symbolic contract eval (M6.1) | Medium | High — improves correctness guarantees |
-| `box<T>` heap type (M9.2) | High | Very high — required for bootstrapping |
 | MCP tool annotations (M7.1) | Medium | High — unlocks AI agent tooling |
 | Package registry (M8.1) | High | Very high — unlocks ecosystem growth |
+| `heap<T>`, `arena<T>`, `trie<K,V>` stdlib (M10.4) | Medium | High — inference scheduling primitives |
+| `effects(async)` state machine (M10.2) | Very high | Very high — deep async integration |
 | SMT integration (M6.2) | Very high | Medium — research milestone |
 
 ---
