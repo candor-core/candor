@@ -448,9 +448,40 @@ struct TypedFile {
 ## These types mirror parser.cnd declarations.
 ## Stmt/Expr are one-variant stubs — bodies are not inspected until Phase 4.
 
-## ── body stubs ───────────────────────────────────────────────────────────────
+## ── body stubs / expression ADT ─────────────────────────────────────────────
+## Stmt stays as a stub — body checking is Phase 4.
+## Expr is expanded here (Phase 3) with concrete variants.
+
 enum Stmt { StmtBlob }
-enum Expr { ExprBlob }
+
+## Helper structs for recursive Expr variants.
+## box<Expr> is a heap pointer, avoiding infinite struct size.
+## Forward reference to Expr is safe: Pass 1 registers all names before
+## Pass 2 resolves field types.
+struct BinExpr   { op: str, left: box<Expr>, right: box<Expr> }
+struct UnExpr    { op: str, operand: box<Expr> }
+struct FldExpr   { obj: box<Expr>, field: str }
+struct CallArgs  { name: str, args: vec<Expr> }
+struct SLitField { name: str, val: box<Expr> }
+struct SLitExpr  { type_name: str, fields: vec<SLitField> }
+
+enum Expr {
+    IntLit(i64),
+    FloatLit(f64),
+    BoolLit(bool),
+    StrLit(str),
+    UnitLit,
+    Ident(str),
+    Bin(box<BinExpr>),
+    Un(box<UnExpr>),
+    Fld(box<FldExpr>),
+    Call(box<CallArgs>),
+    SLit(box<SLitExpr>),
+    SomeE(box<Expr>),
+    NoneE,
+    OkE(box<Expr>),
+    ErrE(box<Expr>),
+}
 
 ## ── declaration node types (mirrored from parser.cnd) ───────────────────────
 struct Param           { name: str, typ: TypeExpr }
@@ -711,4 +742,256 @@ fn collect_signatures(pf: ref<ParsedFile>, env: refmut<TypeEnv>) -> unit {
     pass1(pf, env)
     pass2(pf, env)
     return unit
+}
+
+## ── Phase 3: expression type inference ────────────────────────────────────────────
+##
+## Adds infer_expr which maps an Expr to its resolved Type or an error.
+## Scope access is read-only (ref<ScopeStack> / ref<TypeEnv>).
+##
+## Key pattern: option-unwrapping must arms use
+##   let v = opt must { some(x) => x  none => return err(...) }
+## to avoid must arm type unification failures with result<_ok, _err>.
+##
+## ok_type(t) wraps a Type in result<Type, str> with a concrete error type,
+## so match arms in infer_expr all have the same result type without ambiguity.
+
+## ── literal type sentinels ────────────────────────────────────────────────────────────────
+fn TY_INT_LIT()   -> i64 pure { return 16 }
+fn TY_FLOAT_LIT() -> i64 pure { return 17 }
+fn ty_int_lit()   -> Type pure { return ty_prim(TY_INT_LIT())   }
+fn ty_float_lit() -> Type pure { return ty_prim(TY_FLOAT_LIT()) }
+
+## Typed result wrapper: makes result<Type, str> concrete for match arms.
+fn ok_type(t: Type) -> result<Type, str> { return ok(t) }
+fn err_type(msg: str) -> result<Type, str> { return err(msg) }
+
+## ── numeric type predicates ────────────────────────────────────────────────────────────────
+fn ty_is_int_lit(t: Type) -> bool {
+    return t.kind == TK_PRIM() and t.prim == TY_INT_LIT()
+}
+
+fn ty_is_float_lit(t: Type) -> bool {
+    return t.kind == TK_PRIM() and t.prim == TY_FLOAT_LIT()
+}
+
+fn ty_is_int(t: Type) -> bool {
+    if t.kind != TK_PRIM() { return false }
+    if t.prim == TY_I8()      { return true }
+    if t.prim == TY_I16()     { return true }
+    if t.prim == TY_I32()     { return true }
+    if t.prim == TY_I64()     { return true }
+    if t.prim == TY_I128()    { return true }
+    if t.prim == TY_U8()      { return true }
+    if t.prim == TY_U16()     { return true }
+    if t.prim == TY_U32()     { return true }
+    if t.prim == TY_U64()     { return true }
+    if t.prim == TY_U128()    { return true }
+    if t.prim == TY_INT_LIT() { return true }
+    return false
+}
+
+fn ty_is_float(t: Type) -> bool {
+    if t.kind != TK_PRIM() { return false }
+    if t.prim == TY_F32()       { return true }
+    if t.prim == TY_F64()       { return true }
+    if t.prim == TY_FLOAT_LIT() { return true }
+    return false
+}
+
+fn ty_is_numeric(t: Type) -> bool {
+    return ty_is_int(t) or ty_is_float(t)
+}
+
+fn ty_is_bool(t: Type) -> bool {
+    return t.kind == TK_PRIM() and t.prim == TY_BOOL()
+}
+
+## ── numeric unification ────────────────────────────────────────────────────────────────
+fn ty_unify_numeric(a: Type, b: Type) -> result<Type, str> {
+    if ty_eq(a, b) {
+        if ty_is_numeric(a) { return ok_type(a) }
+        return err_type("non-numeric type in arithmetic")
+    }
+    if ty_is_int_lit(a) and ty_is_int(b)         { return ok_type(b) }
+    if ty_is_int(a) and ty_is_int_lit(b)         { return ok_type(a) }
+    if ty_is_float_lit(a) and ty_is_float(b)     { return ok_type(b) }
+    if ty_is_float(a) and ty_is_float_lit(b)     { return ok_type(a) }
+    if ty_is_int_lit(a) and ty_is_int_lit(b)     { return ok_type(ty_i64()) }
+    if ty_is_float_lit(a) and ty_is_float_lit(b) { return ok_type(ty_f64()) }
+    if ty_is_int_lit(a) and ty_is_float_lit(b)   { return ok_type(ty_f64()) }
+    if ty_is_float_lit(a) and ty_is_int_lit(b)   { return ok_type(ty_f64()) }
+    return err_type("type mismatch in arithmetic expression")
+}
+
+## ── binary operator type rules ─────────────────────────────────────────────────────────
+fn infer_arith(a: Type, b: Type) -> result<Type, str> {
+    return ty_unify_numeric(a, b)
+}
+
+fn infer_cmp(a: Type, b: Type) -> result<Type, str> {
+    if ty_eq(a, b)                               { return ok_type(ty_bool()) }
+    if ty_is_int_lit(a) and ty_is_int(b)         { return ok_type(ty_bool()) }
+    if ty_is_int(a) and ty_is_int_lit(b)         { return ok_type(ty_bool()) }
+    if ty_is_float_lit(a) and ty_is_float(b)     { return ok_type(ty_bool()) }
+    if ty_is_float(a) and ty_is_float_lit(b)     { return ok_type(ty_bool()) }
+    if ty_is_int_lit(a) and ty_is_int_lit(b)     { return ok_type(ty_bool()) }
+    if ty_is_float_lit(a) and ty_is_float_lit(b) { return ok_type(ty_bool()) }
+    return err_type("type mismatch in comparison")
+}
+
+fn infer_logic(a: Type, b: Type) -> result<Type, str> {
+    if ty_is_bool(a) and ty_is_bool(b) { return ok_type(ty_bool()) }
+    return err_type("expected bool operands for logical operator")
+}
+
+fn infer_binop_types(op: str, a: Type, b: Type) -> result<Type, str> {
+    if str_eq(op, "+") or str_eq(op, "-") or str_eq(op, "*") or
+       str_eq(op, "/") or str_eq(op, "%") {
+        return infer_arith(a, b)
+    }
+    if str_eq(op, "==") or str_eq(op, "!=") or str_eq(op, "<") or
+       str_eq(op, ">")  or str_eq(op, "<=") or str_eq(op, ">=") {
+        return infer_cmp(a, b)
+    }
+    if str_eq(op, "and") or str_eq(op, "or") {
+        return infer_logic(a, b)
+    }
+    return err_type(str_concat("unknown binary operator: ", op))
+}
+
+## ── struct field lookup (takes StructDef by value) ───────────────────────────────────
+fn find_field_in_struct(sd: StructDef, field: str, sname: str) -> result<Type, str> {
+    let n = vec_len(sd.fields) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let f = sd.fields[i as u64]
+        if str_eq(f.name, field) { return ok_type(f.typ) }
+        i = i + 1
+    }
+    return err_type(str_concat(sname, str_concat(".", str_concat(field, ": no such field"))))
+}
+
+fn infer_field_access(sname: str, field: str, env: ref<TypeEnv>) -> result<Type, str> {
+    let sd = map_get(env.structs, sname) must {
+        some(s) => s
+        none    => return err_type(str_concat("struct not found: ", sname))
+    }
+    return find_field_in_struct(sd, field, sname)
+}
+
+## ── expression inference helpers ────────────────────────────────────────────────────────
+fn infer_ident(name: str, ss: ref<ScopeStack>, env: ref<TypeEnv>) -> result<Type, str> {
+    let t = scope_lookup(ss, name) must {
+        some(t) => t
+        none    => return err_type(str_concat("undefined identifier: ", name))
+    }
+    return ok_type(t)
+}
+
+fn infer_binop(b: box<BinExpr>, ss: ref<ScopeStack>, env: ref<TypeEnv>) -> result<Type, str> {
+    let be = box_deref(b)
+    let la = infer_expr(box_deref(be.left), ss, env) must {
+        ok(t)  => t
+        err(e) => return err_type(e)
+    }
+    let ra = infer_expr(box_deref(be.right), ss, env) must {
+        ok(t)  => t
+        err(e) => return err_type(e)
+    }
+    return infer_binop_types(be.op, la, ra)
+}
+
+fn infer_unop(u: box<UnExpr>, ss: ref<ScopeStack>, env: ref<TypeEnv>) -> result<Type, str> {
+    let ue = box_deref(u)
+    let t = infer_expr(box_deref(ue.operand), ss, env) must {
+        ok(t)  => t
+        err(e) => return err_type(e)
+    }
+    if str_eq(ue.op, "-") {
+        if ty_is_numeric(t) { return ok_type(t) }
+        return err_type("unary - requires a numeric type")
+    }
+    if str_eq(ue.op, "not") {
+        if ty_is_bool(t) { return ok_type(ty_bool()) }
+        return err_type("not requires a bool operand")
+    }
+    return err_type(str_concat("unknown unary operator: ", ue.op))
+}
+
+fn infer_fld(f: box<FldExpr>, ss: ref<ScopeStack>, env: ref<TypeEnv>) -> result<Type, str> {
+    let fe = box_deref(f)
+    let obj_t = infer_expr(box_deref(fe.obj), ss, env) must {
+        ok(t)  => t
+        err(e) => return err_type(e)
+    }
+    if obj_t.kind == TK_NAMED() {
+        return infer_field_access(obj_t.name, fe.field, env)
+    }
+    return err_type("field access requires a struct type")
+}
+
+fn infer_call_fn(c: box<CallArgs>, env: ref<TypeEnv>) -> result<Type, str> {
+    let ca = box_deref(c)
+    let sig = map_get(env.fns, ca.name) must {
+        some(s) => s
+        none    => return err_type(str_concat("unknown function: ", ca.name))
+    }
+    return ok_type(sig.ret)
+}
+
+fn infer_slit(s: box<SLitExpr>, env: ref<TypeEnv>) -> result<Type, str> {
+    let se = box_deref(s)
+    if map_contains(env.structs, se.type_name) {
+        return ok_type(ty_named(se.type_name))
+    }
+    return err_type(str_concat("unknown struct type: ", se.type_name))
+}
+
+fn infer_some(e: box<Expr>, ss: ref<ScopeStack>, env: ref<TypeEnv>) -> result<Type, str> {
+    let inner = infer_expr(box_deref(e), ss, env) must {
+        ok(t)  => t
+        err(e) => return err_type(e)
+    }
+    return ok_type(ty_gen1("option", inner))
+}
+
+fn infer_ok_expr(e: box<Expr>, ss: ref<ScopeStack>, env: ref<TypeEnv>) -> result<Type, str> {
+    let inner = infer_expr(box_deref(e), ss, env) must {
+        ok(t)  => t
+        err(e) => return err_type(e)
+    }
+    return ok_type(ty_gen2("result", inner, ty_unknown()))
+}
+
+fn infer_err_expr(e: box<Expr>, ss: ref<ScopeStack>, env: ref<TypeEnv>) -> result<Type, str> {
+    let inner = infer_expr(box_deref(e), ss, env) must {
+        ok(t)  => t
+        err(e) => return err_type(e)
+    }
+    return ok_type(ty_gen2("result", ty_unknown(), inner))
+}
+
+## ── infer_expr: main expression type inference entry point ──────────────────────
+## All match arms return result<Type, str> via ok_type/err_type so the type
+## checker can unify them without ambiguous type variables.
+fn infer_expr(expr: Expr, ss: ref<ScopeStack>, env: ref<TypeEnv>) -> result<Type, str> {
+    match expr {
+        Expr::IntLit(v)   => ok_type(ty_int_lit())
+        Expr::FloatLit(v) => ok_type(ty_float_lit())
+        Expr::BoolLit(v)  => ok_type(ty_bool())
+        Expr::StrLit(v)   => ok_type(ty_str())
+        Expr::UnitLit     => ok_type(ty_unit())
+        Expr::NoneE       => ok_type(ty_none())
+        Expr::Ident(name) => infer_ident(name, ss, env)
+        Expr::Bin(b)      => infer_binop(b, ss, env)
+        Expr::Un(u)       => infer_unop(u, ss, env)
+        Expr::Fld(f)      => infer_fld(f, ss, env)
+        Expr::Call(c)     => infer_call_fn(c, env)
+        Expr::SLit(s)     => infer_slit(s, env)
+        Expr::SomeE(e)    => infer_some(e, ss, env)
+        Expr::OkE(e)      => infer_ok_expr(e, ss, env)
+        Expr::ErrE(e)     => infer_err_expr(e, ss, env)
+    }
 }

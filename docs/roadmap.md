@@ -36,6 +36,7 @@ traits, effects, contracts, pattern matching, and a standard library.
 | **M10.3** | Hardware effect tiers: `gpu`, `net`, `storage`, `mem`, `async` added to `KnownEffects`; unknown effect names produce a compiler warning; subset-checking enforced across all new tiers |
 | **M10.4** | `arc<T>` shared reference-counted ownership: `arc_new`, `arc_clone`, `arc_deref`, `arc_drop` builtins; C backend uses `[int64 refcount][T]` layout with `__sync_fetch_and_add`/`__sync_sub_and_fetch`; LLVM backend uses `atomicrmw`; 9 typeck tests pass |
 | **M11.1** | `f16` / `bf16` primitive float types: singletons in `types.go`, registered in `BuiltinTypes`, `IsFloatType`, and `numericRank`; C backend -> `_Float16`/`__bf16`; LLVM backend -> `half`/`bfloat`; implicit widening f16->f32->f64 and bf16->f32->f64; 11 typeck tests pass |
+| **M9.5 Ph3** | `typeck.cnd` Phase 3: full expression ADT (`Expr` enum with 15 variants: literals, ident, binary/unary ops, field access, call, struct literal, some/none/ok/err); `infer_expr` with `ok_type`/`err_type` helpers to resolve result<Type,str> unification; mutual recursion via forward-referenced fn signatures; `TestM9TypeckSource` passes |
 
 ### Known language gaps (not yet wired)
 - Named-return / early-exit in closures
