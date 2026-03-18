@@ -449,10 +449,32 @@ struct TypedFile {
 ## Stmt/Expr are one-variant stubs — bodies are not inspected until Phase 4.
 
 ## ── body stubs / expression ADT ─────────────────────────────────────────────
-## Stmt stays as a stub — body checking is Phase 4.
-## Expr is expanded here (Phase 3) with concrete variants.
+## Stmt (Phase 4) and Expr (Phase 3) are both fully expanded below.
 
-enum Stmt { StmtBlob }
+## ── statement helper structs ────────────────────────────────────────────────────────────────────────────────────
+struct LetStmt    { name: str, mut_: bool, typ: option<TypeExpr>, value: Expr }
+struct RetStmt    { value: Expr }
+struct IfElse     { cond: Expr, then_: vec<Stmt>, else_: option<vec<Stmt>> }
+struct LoopStmt   { body: vec<Stmt> }
+struct WhileStmt  { cond: Expr, body: vec<Stmt> }
+struct ForStmt    { name: str, iter: Expr, body: vec<Stmt> }
+struct AssignStmt { target: Expr, value: Expr }
+struct ExprStmt   { expr: Expr }
+struct AssertStmt { expr: Expr }
+
+enum Stmt {
+    Let(box<LetStmt>),
+    Ret(box<RetStmt>),
+    If(box<IfElse>),
+    Loop(box<LoopStmt>),
+    While(box<WhileStmt>),
+    For(box<ForStmt>),
+    Assign(box<AssignStmt>),
+    ExprS(box<ExprStmt>),
+    Assert(box<AssertStmt>),
+    Break,
+    Continue,
+}
 
 ## Helper structs for recursive Expr variants.
 ## box<Expr> is a heap pointer, avoiding infinite struct size.
@@ -994,4 +1016,260 @@ fn infer_expr(expr: Expr, ss: ref<ScopeStack>, env: ref<TypeEnv>) -> result<Type
         Expr::OkE(e)      => infer_ok_expr(e, ss, env)
         Expr::ErrE(e)     => infer_err_expr(e, ss, env)
     }
+}
+
+## ── Phase 4: statement type checking ────────────────────────────────────────────────────────────────
+##
+## check_stmt accumulates errors into env (error-tolerant) so all statements
+## in a function body are visited even when earlier ones fail.
+##
+## Helpers:
+##   infer_or_unknown   -- infer, record error on fail, return ty_unknown
+##   resolve_or_unknown -- resolve TypeExpr, same fallback
+##   ty_compat          -- assignment compatibility including lit coercions
+
+## ── error-accumulating inference helpers ────────────────────────────────────────────────────────────
+fn infer_unknown_with_err(e: str, env: refmut<TypeEnv>) -> Type {
+    env_error(env, e)
+    return ty_unknown()
+}
+
+fn infer_or_unknown(expr: Expr, ss: ref<ScopeStack>, env: refmut<TypeEnv>) -> Type {
+    infer_expr(expr, ss, env) must {
+        ok(t)  => t
+        err(e) => infer_unknown_with_err(e, env)
+    }
+}
+
+fn resolve_unknown_with_err(e: str, env: refmut<TypeEnv>) -> Type {
+    env_error(env, e)
+    return ty_unknown()
+}
+
+fn resolve_or_unknown(te: TypeExpr, env: refmut<TypeEnv>) -> Type {
+    resolve_type(te, env) must {
+        ok(t)  => t
+        err(e) => resolve_unknown_with_err(e, env)
+    }
+}
+
+## ── type compatibility ────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+fn ty_is_unknown(t: Type) -> bool {
+    return t.kind == TK_PRIM() and t.prim == TY_UNKNOWN()
+}
+
+fn ty_compat(src: Type, dst: Type) -> bool {
+    if ty_is_unknown(src)                        { return true }
+    if ty_is_unknown(dst)                        { return true }
+    if ty_eq(src, dst)                           { return true }
+    if ty_coerce(src, dst)                       { return true }
+    if ty_is_int_lit(src) and ty_is_int(dst)     { return true }
+    if ty_is_float_lit(src) and ty_is_float(dst) { return true }
+    return false
+}
+
+## ── for-in iterator element type ──────────────────────────────────────────────────────────────────────────────────────────
+fn vec_elem_type(vt: Type) -> Type {
+    if vt.kind != TK_GEN()            { return ty_unknown() }
+    if not str_eq(vt.name, "vec")     { return ty_unknown() }
+    if vec_len(vt.params) as i64 == 0 { return ty_unknown() }
+    return vt.params[0]
+}
+
+## ── individual statement checkers ───────────────────────────────────────────────────────────────────────────────────────
+
+fn check_let(ls: box<LetStmt>, ss: refmut<ScopeStack>, env: refmut<TypeEnv>) -> unit {
+    let l = box_deref(ls)
+    let vt = infer_or_unknown(l.value, ss, env)
+    let declared_t = l.typ must {
+        none     => vt
+        some(te) => resolve_or_unknown(te, env)
+    }
+    if not ty_compat(vt, declared_t) {
+        env_error(env, str_concat("let '", str_concat(l.name,
+            str_concat("': cannot assign ", str_concat(ty_show(vt),
+            str_concat(" to declared type ", ty_show(declared_t)))))))
+    }
+    scope_define(ss, l.name, declared_t)
+    return unit
+}
+
+fn check_ret(rs: box<RetStmt>, ss: ref<ScopeStack>, env: refmut<TypeEnv>, ret_ty: Type) -> unit {
+    let r = box_deref(rs)
+    let vt = infer_or_unknown(r.value, ss, env)
+    if not ty_compat(vt, ret_ty) {
+        env_error(env, str_concat("return type mismatch: got ", str_concat(
+            ty_show(vt), str_concat(", expected ", ty_show(ret_ty)))))
+    }
+    return unit
+}
+
+fn check_stmts(stmts: vec<Stmt>, ss: refmut<ScopeStack>, env: refmut<TypeEnv>, ret_ty: Type) -> unit {
+    let n = vec_len(stmts) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        check_stmt(stmts[i as u64], ss, env, ret_ty)
+        i = i + 1
+    }
+    return unit
+}
+
+fn check_else_branch(stmts: vec<Stmt>, ss: refmut<ScopeStack>, env: refmut<TypeEnv>, ret_ty: Type) -> unit {
+    let _idx = scope_push(ss)
+    check_stmts(stmts, ss, env, ret_ty)
+    scope_pop(ss)
+    return unit
+}
+
+fn check_if(is_: box<IfElse>, ss: refmut<ScopeStack>, env: refmut<TypeEnv>, ret_ty: Type) -> unit {
+    let ifs = box_deref(is_)
+    let ct = infer_or_unknown(ifs.cond, ss, env)
+    if not ty_is_bool(ct) and not ty_is_unknown(ct) {
+        env_error(env, str_concat("if condition must be bool, got ", ty_show(ct)))
+    }
+    let _idx = scope_push(ss)
+    check_stmts(ifs.then_, ss, env, ret_ty)
+    scope_pop(ss)
+    ifs.else_ must {
+        some(els) => check_else_branch(els, ss, env, ret_ty)
+        none      => unit
+    }
+    return unit
+}
+
+fn check_loop(ls: box<LoopStmt>, ss: refmut<ScopeStack>, env: refmut<TypeEnv>, ret_ty: Type) -> unit {
+    let l = box_deref(ls)
+    let _idx = scope_push(ss)
+    check_stmts(l.body, ss, env, ret_ty)
+    scope_pop(ss)
+    return unit
+}
+
+fn check_while(ws: box<WhileStmt>, ss: refmut<ScopeStack>, env: refmut<TypeEnv>, ret_ty: Type) -> unit {
+    let w = box_deref(ws)
+    let ct = infer_or_unknown(w.cond, ss, env)
+    if not ty_is_bool(ct) and not ty_is_unknown(ct) {
+        env_error(env, str_concat("while condition must be bool, got ", ty_show(ct)))
+    }
+    let _idx = scope_push(ss)
+    check_stmts(w.body, ss, env, ret_ty)
+    scope_pop(ss)
+    return unit
+}
+
+fn check_for(fs: box<ForStmt>, ss: refmut<ScopeStack>, env: refmut<TypeEnv>, ret_ty: Type) -> unit {
+    let f = box_deref(fs)
+    let iter_t = infer_or_unknown(f.iter, ss, env)
+    let elem_t = vec_elem_type(iter_t)
+    let _idx = scope_push(ss)
+    scope_define(ss, f.name, elem_t)
+    check_stmts(f.body, ss, env, ret_ty)
+    scope_pop(ss)
+    return unit
+}
+
+fn check_assign(as_: box<AssignStmt>, ss: ref<ScopeStack>, env: refmut<TypeEnv>) -> unit {
+    let a = box_deref(as_)
+    let tgt_t = infer_or_unknown(a.target, ss, env)
+    let val_t = infer_or_unknown(a.value, ss, env)
+    if not ty_compat(val_t, tgt_t) {
+        env_error(env, str_concat("assignment type mismatch: cannot assign ",
+            str_concat(ty_show(val_t), str_concat(" to ", ty_show(tgt_t)))))
+    }
+    return unit
+}
+
+fn check_expr_stmt(es: box<ExprStmt>, ss: ref<ScopeStack>, env: refmut<TypeEnv>) -> unit {
+    let _t = infer_or_unknown(es.expr, ss, env)
+    return unit
+}
+
+fn check_assert(as_: box<AssertStmt>, ss: ref<ScopeStack>, env: refmut<TypeEnv>) -> unit {
+    let a = box_deref(as_)
+    let ct = infer_or_unknown(a.expr, ss, env)
+    if not ty_is_bool(ct) and not ty_is_unknown(ct) {
+        env_error(env, str_concat("assert condition must be bool, got ", ty_show(ct)))
+    }
+    return unit
+}
+
+## check_stmt: main dispatch
+fn check_stmt(stmt: Stmt, ss: refmut<ScopeStack>, env: refmut<TypeEnv>, ret_ty: Type) -> unit {
+    match stmt {
+        Stmt::Let(ls)     => check_let(ls, ss, env)
+        Stmt::Ret(rs)     => check_ret(rs, ss, env, ret_ty)
+        Stmt::If(is_)     => check_if(is_, ss, env, ret_ty)
+        Stmt::Loop(ls)    => check_loop(ls, ss, env, ret_ty)
+        Stmt::While(ws)   => check_while(ws, ss, env, ret_ty)
+        Stmt::For(fs)     => check_for(fs, ss, env, ret_ty)
+        Stmt::Assign(a)   => check_assign(a, ss, env)
+        Stmt::ExprS(es)   => check_expr_stmt(es, ss, env)
+        Stmt::Assert(as_) => check_assert(as_, ss, env)
+        Stmt::Break       => unit
+        Stmt::Continue    => unit
+    }
+}
+
+## ── Phase 5: function body + file-level entry point ────────────────────────────────────────────────────────────
+##
+## check_fn_body: fresh scope, define params, check body statements.
+## typecheck: public entry -- collect_signatures then check_bodies.
+
+fn define_params_in_scope(params: vec<Param>, ss: refmut<ScopeStack>, env: refmut<TypeEnv>) -> unit {
+    let n = vec_len(params) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let p = params[i as u64]
+        let pt = resolve_or_unknown(p.typ, env)
+        scope_define(ss, p.name, pt)
+        i = i + 1
+    }
+    return unit
+}
+
+fn check_fn_body(f: FnDecl, env: refmut<TypeEnv>) -> unit {
+    let mut ss = scope_stack_new()
+    let _idx = scope_push(ss)
+    define_params_in_scope(f.params, ss, env)
+    let ret_ty = resolve_or_unknown(f.ret, env)
+    check_stmts(f.body, ss, env, ret_ty)
+    scope_pop(ss)
+    return unit
+}
+
+fn check_decl_body(d: Decl, env: refmut<TypeEnv>) -> unit {
+    match d {
+        Decl::FnD(fd)     => check_fn_body(box_deref(fd), env)
+        Decl::StructD(sd) => unit
+        Decl::EnumD(ed)   => unit
+        Decl::ExternD(xd) => unit
+        Decl::ConstD(cd)  => unit
+        Decl::TraitD(td)  => unit
+        Decl::ImplD(id)   => unit
+        Decl::ModuleD(nm) => unit
+        Decl::UseD(nm)    => unit
+    }
+}
+
+fn check_bodies(pf: ref<ParsedFile>, env: refmut<TypeEnv>) -> unit {
+    let n = vec_len(pf.decls) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        check_decl_body(pf.decls[i as u64], env)
+        i = i + 1
+    }
+    return unit
+}
+
+## typecheck: public entry point.
+## Runs two-pass signature collection (Phase 2) then full body checking (Phase 5).
+## Returns TypedFile with all accumulated errors and warnings.
+fn typecheck(pf: ref<ParsedFile>) -> TypedFile {
+    let mut env = type_env_new()
+    collect_signatures(pf, env)
+    check_bodies(pf, env)
+    return TypedFile{ name: pf.name, errors: env.errors, warnings: env.warnings }
 }
