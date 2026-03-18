@@ -14,6 +14,7 @@ import (
 
 	emit_c "github.com/scottcorleyg1/candor/compiler/emit_c"
 	"github.com/scottcorleyg1/candor/compiler/diagnostics"
+	"github.com/scottcorleyg1/candor/compiler/doc"
 	"github.com/scottcorleyg1/candor/compiler/emit_llvm"
 	"github.com/scottcorleyg1/candor/compiler/lexer"
 	"github.com/scottcorleyg1/candor/compiler/lsp"
@@ -38,6 +39,7 @@ Usage:
   candorc lsp                                 start the LSP server (stdin/stdout, JSON-RPC 2.0)
   candorc mcp   [file.cnd ...]                emit tools.json MCP manifest for #mcp_tool functions
   candorc doc   [file.cnd ...]                emit intent.json for #intent-annotated functions
+  candorc doc   --html [file.cnd ...]         emit docs.html API reference from /// doc comments
 
 Flags may be combined: candorc build --debug --backend=llvm --sanitize=address,undefined
 Target examples: aarch64-unknown-linux-gnu  x86_64-apple-macosx14.0  wasm32 (alias for wasm32-unknown-unknown)
@@ -387,8 +389,14 @@ func candorTypeToJsonSchema(t string) string {
 
 // ── candorc doc ──────────────────────────────────────────────────────────────
 
-// cmdDoc collects #intent-annotated functions and emits an intent.json file.
+// cmdDoc collects documentation from source files.
+// Without --html: emits intent.json for #intent-annotated functions.
+// With --html:    emits docs.html — a full API reference from /// doc comments.
 func cmdDoc(args []string) error {
+	if hasFlag(args, "--html") {
+		return cmdDocHTML(args)
+	}
+
 	targets, err := resolveTargets(args)
 	if err != nil { return err }
 	type fnEntry struct {
@@ -427,6 +435,33 @@ func cmdDoc(args []string) error {
 	outPath := "intent.json"
 	if err := os.WriteFile(outPath, out, 0o644); err != nil { return err }
 	fmt.Printf("doc: wrote %s (%d function(s))\n", outPath, len(fns))
+	return nil
+}
+
+// cmdDocHTML generates a self-contained HTML API reference from /// doc comments.
+func cmdDocHTML(args []string) error {
+	targets, err := resolveTargets(args)
+	if err != nil { return err }
+
+	var fileDocs []doc.FileDoc
+	for _, path := range targets {
+		raw, err := os.ReadFile(path)
+		if err != nil { return err }
+		src := string(raw)
+		tokens, err := lexer.Tokenize(path, src)
+		if err != nil { return err }
+		file, err := parser.Parse(path, tokens)
+		if err != nil { return err }
+		fileDocs = append(fileDocs, doc.FileDoc{
+			File:        file,
+			DocComments: doc.ExtractDocComments(src),
+		})
+	}
+
+	html := doc.GenHTML(fileDocs)
+	outPath := "docs.html"
+	if err := os.WriteFile(outPath, []byte(html), 0o644); err != nil { return err }
+	fmt.Printf("doc: wrote %s (%d file(s))\n", outPath, len(fileDocs))
 	return nil
 }
 

@@ -135,6 +135,15 @@ func (l *lexer) scanOne() error {
 		return nil
 	}
 
+	// /// doc comment — consume to end of line, emit nothing.
+	// Extracted separately by the doc generator; the parser ignores them.
+	if r == '/' && l.peekAt(1) == '/' && l.peekAt(2) == '/' {
+		for !l.done() && l.peek() != '\n' {
+			l.advance()
+		}
+		return nil
+	}
+
 	// # directive — #use, #intent, #import_c_header, etc.
 	if r == '#' {
 		return l.scanDirective()
