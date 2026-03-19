@@ -3738,6 +3738,131 @@ func (e *emitter) emitBuiltinCall(name string, args []parser.Expr, sb *strings.B
 			argB.String())
 		return true, nil
 
+	case "tensor_dot":
+		// tensor_dot(a, b) → sum of a[i]*b[i] over all elements
+		if len(args) != 2 {
+			return false, nil
+		}
+		t := e.res.ExprTypes[args[0]]
+		if ref, ok := t.(*typeck.GenType); ok && ref.Con == "ref" && len(ref.Params) == 1 {
+			t = ref.Params[0]
+		}
+		gen, ok := t.(*typeck.GenType)
+		if !ok || gen.Con != "tensor" || len(gen.Params) != 1 {
+			return false, nil
+		}
+		elemC, err := e.cType(gen.Params[0])
+		if err != nil {
+			return true, err
+		}
+		var aB, bB strings.Builder
+		if err := e.emitExpr(args[0], &aB); err != nil {
+			return true, err
+		}
+		if err := e.emitExpr(args[1], &bB); err != nil {
+			return true, err
+		}
+		fmt.Fprintf(sb,
+			"(__extension__ ({ __auto_type _da = &(%s); __auto_type _db = &(%s); "+
+				"%s _acc = 0; "+
+				"int64_t _n = _da->_size < _db->_size ? _da->_size : _db->_size; "+
+				"for (int64_t _i = 0; _i < _n; _i++) _acc += _da->_data[_i] * _db->_data[_i]; "+
+				"_acc; }))",
+			aB.String(), bB.String(), elemC)
+		return true, nil
+
+	case "tensor_l2":
+		// tensor_l2(a) → sqrt(sum(a[i]^2))
+		if len(args) != 1 {
+			return false, nil
+		}
+		t := e.res.ExprTypes[args[0]]
+		if ref, ok := t.(*typeck.GenType); ok && ref.Con == "ref" && len(ref.Params) == 1 {
+			t = ref.Params[0]
+		}
+		gen, ok := t.(*typeck.GenType)
+		if !ok || gen.Con != "tensor" || len(gen.Params) != 1 {
+			return false, nil
+		}
+		elemC, err := e.cType(gen.Params[0])
+		if err != nil {
+			return true, err
+		}
+		var aB strings.Builder
+		if err := e.emitExpr(args[0], &aB); err != nil {
+			return true, err
+		}
+		fmt.Fprintf(sb,
+			"(__extension__ ({ __auto_type _la = &(%s); "+
+				"%s _acc = 0; "+
+				"for (int64_t _i = 0; _i < _la->_size; _i++) _acc += _la->_data[_i] * _la->_data[_i]; "+
+				"(%s)sqrt((double)_acc); }))",
+			aB.String(), elemC, elemC)
+		return true, nil
+
+	case "tensor_cosine":
+		// tensor_cosine(a, b) → dot(a,b) / (l2(a) * l2(b))
+		if len(args) != 2 {
+			return false, nil
+		}
+		t := e.res.ExprTypes[args[0]]
+		if ref, ok := t.(*typeck.GenType); ok && ref.Con == "ref" && len(ref.Params) == 1 {
+			t = ref.Params[0]
+		}
+		gen, ok := t.(*typeck.GenType)
+		if !ok || gen.Con != "tensor" || len(gen.Params) != 1 {
+			return false, nil
+		}
+		elemC, err := e.cType(gen.Params[0])
+		if err != nil {
+			return true, err
+		}
+		var aB, bB strings.Builder
+		if err := e.emitExpr(args[0], &aB); err != nil {
+			return true, err
+		}
+		if err := e.emitExpr(args[1], &bB); err != nil {
+			return true, err
+		}
+		fmt.Fprintf(sb,
+			"(__extension__ ({ __auto_type _ca = &(%s); __auto_type _cb = &(%s); "+
+				"%s _dot = 0, _na = 0, _nb = 0; "+
+				"int64_t _n = _ca->_size < _cb->_size ? _ca->_size : _cb->_size; "+
+				"for (int64_t _i = 0; _i < _n; _i++) { "+
+				"_dot += _ca->_data[_i] * _cb->_data[_i]; "+
+				"_na += _ca->_data[_i] * _ca->_data[_i]; "+
+				"_nb += _cb->_data[_i] * _cb->_data[_i]; } "+
+				"(%s)(_dot / (sqrt((double)_na) * sqrt((double)_nb) + 1e-12)); }))",
+			aB.String(), bB.String(), elemC, elemC)
+		return true, nil
+
+	case "tensor_matmul":
+		// tensor_matmul(a, b, out) — a[M,K] * b[K,N] → out[M,N]  (row-major)
+		// out is written, not returned; result is unit (no value to write to sb).
+		if len(args) != 3 {
+			return false, nil
+		}
+		var aB, bB, outB strings.Builder
+		if err := e.emitExpr(args[0], &aB); err != nil {
+			return true, err
+		}
+		if err := e.emitExpr(args[1], &bB); err != nil {
+			return true, err
+		}
+		if err := e.emitExpr(args[2], &outB); err != nil {
+			return true, err
+		}
+		fmt.Fprintf(sb,
+			"(__extension__ ({ __auto_type _ma = &(%s); __auto_type _mb = &(%s); __auto_type _mo = &(%s); "+
+				"int64_t _M = _ma->_shape[0], _K = _ma->_shape[1], _N = _mb->_shape[1]; "+
+				"for (int64_t _i = 0; _i < _M; _i++) "+
+				"for (int64_t _j = 0; _j < _N; _j++) { "+
+				"__auto_type _s = _mo->_data[_i*_N+_j]; "+
+				"for (int64_t _k = 0; _k < _K; _k++) _s += _ma->_data[_i*_K+_k] * _mb->_data[_k*_N+_j]; "+
+				"_mo->_data[_i*_N+_j] = _s; } }))",
+			aB.String(), bB.String(), outB.String())
+		return true, nil
+
 	case "print_char":
 		if len(args) != 1 {
 			return false, nil

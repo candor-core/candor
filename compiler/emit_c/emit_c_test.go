@@ -1302,3 +1302,60 @@ fn main() -> unit {
 	c := pipeline(t, src)
 	assertContains(t, c, "_fi")
 }
+
+// ── M11.3: SIMD distance intrinsics ──────────────────────────────────────────
+
+func TestTensorDotEmitted(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let a: tensor<f32> = tensor_zeros([4])
+    let b: tensor<f32> = tensor_zeros([4])
+    let d: f32 = tensor_dot(a, b)
+    return unit
+}
+`
+	c := pipeline(t, src)
+	assertContains(t, c, "_acc")
+}
+
+func TestTensorL2EmittedSqrt(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let a: tensor<f64> = tensor_zeros([3])
+    let n: f64 = tensor_l2(a)
+    return unit
+}
+`
+	c := pipeline(t, src)
+	assertContains(t, c, "sqrt")
+}
+
+func TestTensorCosineEmitted(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let a: tensor<f32> = tensor_zeros([8])
+    let b: tensor<f32> = tensor_zeros([8])
+    let sim: f32 = tensor_cosine(a, b)
+    return unit
+}
+`
+	c := pipeline(t, src)
+	assertContains(t, c, "_dot")
+	assertContains(t, c, "1e-12")
+}
+
+func TestTensorMatmulEmitted(t *testing.T) {
+	src := `
+fn main() -> unit {
+    let a: tensor<f32> = tensor_zeros([2, 3])
+    let b: tensor<f32> = tensor_zeros([3, 4])
+    let mut out: tensor<f32> = tensor_zeros([2, 4])
+    tensor_matmul(a, b, out)
+    return unit
+}
+`
+	c := pipeline(t, src)
+	assertContains(t, c, "_M")
+	assertContains(t, c, "_K")
+	assertContains(t, c, "_N")
+}

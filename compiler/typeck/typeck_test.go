@@ -2154,3 +2154,56 @@ func TestTensorFreeWrongType(t *testing.T) {
 	mustFail(t, `fn f() -> unit { tensor_free(42) return unit }`,
 		"tensor_free() requires tensor<T>")
 }
+
+// ── M11.3: SIMD distance intrinsics ──────────────────────────────────────────
+
+func TestTensorDot(t *testing.T) {
+	mustCompile(t, `
+fn f() -> f32 {
+    let a: tensor<f32> = tensor_zeros([4])
+    let b: tensor<f32> = tensor_zeros([4])
+    return tensor_dot(a, b)
+}`)
+}
+
+func TestTensorL2(t *testing.T) {
+	mustCompile(t, `
+fn f() -> f64 {
+    let a: tensor<f64> = tensor_zeros([3])
+    return tensor_l2(a)
+}`)
+}
+
+func TestTensorCosine(t *testing.T) {
+	mustCompile(t, `
+fn f() -> f32 {
+    let a: tensor<f32> = tensor_zeros([8])
+    let b: tensor<f32> = tensor_zeros([8])
+    return tensor_cosine(a, b)
+}`)
+}
+
+func TestTensorMatmul(t *testing.T) {
+	mustCompile(t, `
+fn f() -> unit {
+    let a: tensor<f32> = tensor_zeros([2, 3])
+    let b: tensor<f32> = tensor_zeros([3, 4])
+    let mut out: tensor<f32> = tensor_zeros([2, 4])
+    tensor_matmul(a, b, out)
+    return unit
+}`)
+}
+
+func TestTensorDotWrongArgCount(t *testing.T) {
+	mustFail(t, `fn f() -> unit { let a: tensor<f32> = tensor_zeros([1]) tensor_dot(a) return unit }`,
+		"tensor_dot() takes 2 arguments")
+}
+
+func TestTensorL2WrongType(t *testing.T) {
+	mustFail(t, `fn f() -> unit { tensor_l2(42) return unit }`,
+		"expected tensor<T>")
+}
+
+func TestEffectsSimdKnown(t *testing.T) {
+	mustCompile(t, `fn kern() -> unit effects(simd) { return unit }`)
+}

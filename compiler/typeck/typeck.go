@@ -757,6 +757,8 @@ var KnownEffects = map[string]bool{
 	"net":     true, // NIXL / InfiniBand / RoCE / NVLink transfers
 	"storage": true, // SSD / object store (S3, VAST) — KV cache spill
 	"mem":     true, // CPU RAM management — KV block manager, eviction logic
+	// SIMD / vector compute (M11.3)
+	"simd":    true, // SIMD width-dependent ops — vec_dot, vec_l2, tensor_matmul
 }
 
 // warnUnknownEffects emits a warning for any effect name not in KnownEffects.
@@ -766,7 +768,7 @@ func (c *checker) warnUnknownEffects(ann *parser.EffectsAnnotation, tok lexer.To
 	}
 	for _, name := range ann.Names {
 		if !KnownEffects[name] {
-			c.warnf(tok, "unknown effect %q; known effects: io, sys, time, rand, async, gpu, net, storage, mem", name)
+			c.warnf(tok, "unknown effect %q; known effects: io, sys, time, rand, async, gpu, net, storage, mem, simd", name)
 		}
 	}
 }
@@ -1505,6 +1507,14 @@ func (c *checker) inferExpr(expr parser.Expr, sc *scope, hint Type) (Type, error
 				return c.inferTensorLen(e, ident, sc)
 			case "tensor_free":
 				return c.inferTensorFree(e, ident, sc)
+			case "tensor_dot":
+				return c.inferTensorDot(e, ident, sc)
+			case "tensor_l2":
+				return c.inferTensorL2(e, ident, sc)
+			case "tensor_cosine":
+				return c.inferTensorCosine(e, ident, sc)
+			case "tensor_matmul":
+				return c.inferTensorMatmul(e, ident, sc)
 			case "refmut":
 				return c.inferRefmutCall(e, sc)
 			}
@@ -3301,6 +3311,98 @@ func (c *checker) inferTensorFree(e *parser.CallExpr, fn *parser.IdentExpr, sc *
 		return nil, c.errorf(e.Args[0].Pos(), "tensor_free() requires tensor<T>, got %s", argType)
 	}
 	_ = gen
+	c.record(fn, TUnit)
+	return TUnit, nil
+}
+
+// -- tensor SIMD intrinsics (M11.3) ------------------------------------------
+
+// unwrapTensorElem extracts T from tensor<T> or ref<tensor<T>>; errors if neither.
+func (c *checker) unwrapTensorElem(e *parser.CallExpr, argIdx int, argType Type) (Type, error) {
+	t := argType
+	if ref, ok := t.(*GenType); ok && ref.Con == "ref" && len(ref.Params) == 1 {
+		t = ref.Params[0]
+	}
+	gen, ok := t.(*GenType)
+	if !ok || gen.Con != "tensor" || len(gen.Params) != 1 {
+		return nil, c.errorf(e.Args[argIdx].Pos(), "expected tensor<T> or ref<tensor<T>>, got %s", argType)
+	}
+	return gen.Params[0], nil
+}
+
+// tensor_dot(a, b) -> T   (element-wise product sum)
+func (c *checker) inferTensorDot(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 2 {
+		return nil, c.errorf(e.LParen, "tensor_dot() takes 2 arguments: tensor<T>, tensor<T>")
+	}
+	at, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	elem, err := c.unwrapTensorElem(e, 0, at)
+	if err != nil {
+		return nil, err
+	}
+	_, err = c.checkExpr(e.Args[1], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.record(fn, elem)
+	return elem, nil
+}
+
+// tensor_l2(a) -> T   (L2 norm = sqrt(sum(a[i]^2)))
+func (c *checker) inferTensorL2(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 1 {
+		return nil, c.errorf(e.LParen, "tensor_l2() takes 1 argument: tensor<T>")
+	}
+	at, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	elem, err := c.unwrapTensorElem(e, 0, at)
+	if err != nil {
+		return nil, err
+	}
+	c.record(fn, elem)
+	return elem, nil
+}
+
+// tensor_cosine(a, b) -> T   (cosine similarity = dot(a,b) / (l2(a)*l2(b)))
+func (c *checker) inferTensorCosine(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 2 {
+		return nil, c.errorf(e.LParen, "tensor_cosine() takes 2 arguments: tensor<T>, tensor<T>")
+	}
+	at, err := c.checkExpr(e.Args[0], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	elem, err := c.unwrapTensorElem(e, 0, at)
+	if err != nil {
+		return nil, err
+	}
+	_, err = c.checkExpr(e.Args[1], sc, nil)
+	if err != nil {
+		return nil, err
+	}
+	c.record(fn, elem)
+	return elem, nil
+}
+
+// tensor_matmul(a, b, out) -> unit   (out[i,j] += a[i,k]*b[k,j])
+func (c *checker) inferTensorMatmul(e *parser.CallExpr, fn *parser.IdentExpr, sc *scope) (Type, error) {
+	if len(e.Args) != 3 {
+		return nil, c.errorf(e.LParen, "tensor_matmul() takes 3 arguments: tensor<T>, tensor<T>, ref<tensor<T>>")
+	}
+	for i := 0; i < 3; i++ {
+		at, err := c.checkExpr(e.Args[i], sc, nil)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := c.unwrapTensorElem(e, i, at); err != nil {
+			return nil, err
+		}
+	}
 	c.record(fn, TUnit)
 	return TUnit, nil
 }
