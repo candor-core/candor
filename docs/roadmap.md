@@ -46,6 +46,7 @@ traits, effects, contracts, pattern matching, and a standard library.
 | **M7.2** | `candorc doc` subcommand + `#intent "desc"` directive: emits `intent.json` with function names, intent strings, and signatures — ready for RAG/embedding indexes |
 | **M7.4** | `#export_json` struct directive: generates `StructName_to_json(S) -> CandorStr` and `StructName_from_json(CandorStr) -> result<S,str>` C functions for annotated structs; supports str, bool, integer, and float fields |
 | **M8.3** | `candorc doc --html` documentation generator: `///` doc-comment syntax recognised by lexer (consumed, no token emitted); `compiler/doc` package with `ExtractDocComments` (raw source pre-pass) and `GenHTML` (self-contained HTML with fn cards, struct/enum sections, effects tags, contract badges); 9 doc package tests pass |
+| **M7.3** | `cap<T>` capability tokens: `cap Name` declaration introduces a named capability; `cap<Name>` is a zero-size proof type; `cap(X)` function annotation enforced at call sites — caller must have `cap(X)` annotation or `cap<X>` in scope; C backend emits `typedef uint8_t cap_Name`; 6 typeck tests pass |
 
 ### Known language gaps (not yet wired)
 - Named-return / early-exit in closures

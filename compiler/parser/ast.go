@@ -138,6 +138,17 @@ type ImplDecl struct {
 func (d *ImplDecl) Pos() lexer.Token { return d.ImplTok }
 func (d *ImplDecl) declNode()        {}
 
+// CapabilityDecl: cap Name
+// Declares a named capability token type. The type cap<Name> is a zero-size
+// proof token that a function has been granted the named capability.
+type CapabilityDecl struct {
+	CapTok lexer.Token
+	Name   lexer.Token
+}
+
+func (d *CapabilityDecl) Pos() lexer.Token { return d.CapTok }
+func (d *CapabilityDecl) declNode()        {}
+
 // TraitDecl: trait Name { fn method(self: ref<Self>, ...) -> RetType }
 // Declares an interface that types can implement.
 type TraitDecl struct {

@@ -1920,3 +1920,49 @@ fn bad(v: vec<i64>) -> bool { return exists x in v : x + 1 }`)
 		t.Fatal("expected error: non-bool predicate")
 	}
 }
+
+// ── M7.3 capability tokens ────────────────────────────────────────────────────
+
+func TestCapDeclarationParsesOk(t *testing.T) {
+	mustCompile(t, `
+cap Admin
+fn privileged(token: cap<Admin>) -> unit cap(Admin) { return unit }
+`)
+}
+
+func TestCapTypeAsParamAllowed(t *testing.T) {
+	mustCompile(t, `
+cap Io
+fn do_io(token: cap<Io>) -> unit { return unit }
+`)
+}
+
+func TestCapEnforcedMissingToken(t *testing.T) {
+	mustFail(t, `
+cap Admin
+fn sensitive() -> unit cap(Admin) { return unit }
+fn caller() -> unit { sensitive() }
+`, "cap<Admin>")
+}
+
+func TestCapAllowedViaSameCapAnnotation(t *testing.T) {
+	mustCompile(t, `
+cap Admin
+fn sensitive() -> unit cap(Admin) { return unit }
+fn caller() -> unit cap(Admin) { sensitive() }
+`)
+}
+
+func TestCapAllowedViaParam(t *testing.T) {
+	mustCompile(t, `
+cap Admin
+fn sensitive() -> unit cap(Admin) { return unit }
+fn caller(token: cap<Admin>) -> unit { sensitive() }
+`)
+}
+
+func TestCapUnknownCapabilityError(t *testing.T) {
+	mustFail(t, `
+fn f(x: cap<Undeclared>) -> unit { return unit }
+`, "unknown capability")
+}

@@ -97,6 +97,9 @@ func (e *emitter) emitFile(file *parser.File) error {
 			e.writef("typedef struct %s %s;\n", d.Name.Lexeme, d.Name.Lexeme)
 		case *parser.EnumDecl:
 			e.writef("typedef struct %s %s;\n", d.Name.Lexeme, d.Name.Lexeme)
+		case *parser.CapabilityDecl:
+			// cap<Name> is a zero-size proof token; uint8_t at runtime.
+			e.writef("typedef uint8_t cap_%s;\n", d.Name.Lexeme)
 		}
 	}
 
@@ -4647,8 +4650,18 @@ func (e *emitter) cType(t typeck.Type) (string, error) {
 			if len(tt.Params) == 1 {
 				return e.cType(tt.Params[0])
 			}
+		case "cap":
+			// cap<Name> is a zero-size capability token; emitted as cap_Name (uint8_t typedef).
+			if len(tt.Params) == 1 {
+				if ct, ok := tt.Params[0].(*typeck.CapabilityType); ok {
+					return "cap_" + ct.Name, nil
+				}
+			}
 		}
 		return "", fmt.Errorf("unsupported generic type: %s", t)
+
+	case *typeck.CapabilityType:
+		return "cap_" + tt.Name, nil
 
 	case *typeck.StructType:
 		return tt.Name, nil

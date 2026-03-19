@@ -129,7 +129,8 @@ func (p *parser) parseFile(name string) (*File, error) {
 				!p.check(lexer.TokStruct) &&
 				!p.check(lexer.TokEnum) &&
 				!p.check(lexer.TokImpl) &&
-				!p.check(lexer.TokTrait) {
+				!p.check(lexer.TokTrait) &&
+				!p.check(lexer.TokCap) {
 				p.advance()
 			}
 			pendingDirectives = append(pendingDirectives, word)
@@ -183,10 +184,21 @@ func (p *parser) parseDecl() (Decl, error) {
 		return p.parseImplDecl()
 	case lexer.TokTrait:
 		return p.parseTraitDecl()
+	case lexer.TokCap:
+		return p.parseCapabilityDecl()
 	default:
 		t := p.peek()
-		return nil, p.errorf(t, "expected declaration (fn, struct, enum, module, use, extern, const, impl, or trait), got %v %q", t.Type, t.Lexeme)
+		return nil, p.errorf(t, "expected declaration (fn, struct, enum, module, use, extern, const, impl, trait, or cap), got %v %q", t.Type, t.Lexeme)
 	}
+}
+
+func (p *parser) parseCapabilityDecl() (*CapabilityDecl, error) {
+	capTok := p.advance() // consume 'cap'
+	name, err := p.expect(lexer.TokIdent)
+	if err != nil {
+		return nil, err
+	}
+	return &CapabilityDecl{CapTok: capTok, Name: name}, nil
 }
 
 func (p *parser) parseExternFnDecl() (*ExternFnDecl, error) {
@@ -1373,8 +1385,9 @@ func (p *parser) parseLambdaExpr() (*LambdaExpr, error) {
 func (p *parser) parseType() (TypeExpr, error) {
 	t := p.peek()
 	switch t.Type {
-	case lexer.TokIdent, lexer.TokSecret:
-		// `secret` is a keyword but also valid as a generic type constructor.
+	case lexer.TokIdent, lexer.TokSecret, lexer.TokCap:
+		// `secret` and `cap` are keywords but also valid as generic type constructors
+		// in type position: e.g. secret<T>, cap<Admin>.
 		name := p.advance()
 		if p.check(lexer.TokLt) {
 			return p.parseGenericType(name)

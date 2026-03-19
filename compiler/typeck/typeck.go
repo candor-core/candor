@@ -107,6 +107,8 @@ type Result struct {
 	ConstDecls []*parser.ConstDecl
 	// Warnings holds all non-fatal diagnostics (unused variables, shadowing, etc.).
 	Warnings []Warning
+	// CapabilityDecls holds all `cap Name` declarations for the C emitter.
+	CapabilityDecls []*parser.CapabilityDecl
 }
 
 // Check type-checks a fully parsed File and returns a Result.
@@ -130,6 +132,7 @@ func Check(file *parser.File) (*Result, error) {
 		consts:          make(map[string]Type),
 		traits:          make(map[string]*TraitDef),
 		traitImpls:      make(map[string]map[string]bool),
+		capabilities:    make(map[string]bool),
 		// symModule intentionally nil — disables module enforcement
 	}
 	if err := c.checkFile(file); err != nil {
@@ -157,6 +160,7 @@ func Check(file *parser.File) (*Result, error) {
 		Consts:           c.consts,
 		ConstDecls:       c.constDecls,
 		Warnings:         c.warnings,
+		CapabilityDecls:  c.capDecls,
 	}, nil
 }
 
@@ -182,6 +186,7 @@ func CheckProgram(files []*parser.File) (*Result, error) {
 		consts:          make(map[string]Type),
 		traits:          make(map[string]*TraitDef),
 		traitImpls:      make(map[string]map[string]bool),
+		capabilities:    make(map[string]bool),
 		symModule:       make(map[string]string), // non-nil enables enforcement
 	}
 	if err := c.checkProgram(files); err != nil {
@@ -209,6 +214,7 @@ func CheckProgram(files []*parser.File) (*Result, error) {
 		Consts:           c.consts,
 		ConstDecls:       c.constDecls,
 		Warnings:         c.warnings,
+		CapabilityDecls:  c.capDecls,
 	}, nil
 }
 
@@ -464,6 +470,10 @@ type checker struct {
 	symModule     map[string]string // top-level name → declaring module ("" = root/no module)
 	currentModule string            // module of the file currently being checked
 	currentUses   map[string]string // imported name → source module (for current file)
+
+	// Capability system
+	capabilities map[string]bool            // names declared with `cap Name`
+	capDecls     []*parser.CapabilityDecl   // for the emitter
 }
 
 // scope is a linked chain of variable bindings.
@@ -788,7 +798,7 @@ func (c *checker) checkFile(file *parser.File) error {
 	for name, ann := range BuiltinEffects {
 		c.fnEffects[name] = ann
 	}
-	// Pass 1a: Pre-register struct, enum types, and trait definitions.
+	// Pass 1a: Pre-register struct, enum types, trait definitions, and capabilities.
 	for _, decl := range file.Decls {
 		switch d := decl.(type) {
 		case *parser.StructDecl:
@@ -799,6 +809,9 @@ func (c *checker) checkFile(file *parser.File) error {
 			if err := c.collectTraitDecl(d); err != nil {
 				return err
 			}
+		case *parser.CapabilityDecl:
+			c.capabilities[d.Name.Lexeme] = true
+			c.capDecls = append(c.capDecls, d)
 		}
 	}
 
@@ -969,6 +982,17 @@ func (c *checker) resolveTypeExpr(te parser.TypeExpr) (Type, error) {
 		return nil, c.errorf(t.Name, "unknown type %q", name)
 
 	case *parser.GenericType:
+		// Special case: cap<Name> — Name is a capability, not a regular type.
+		if t.Name.Lexeme == "cap" && len(t.Params) == 1 {
+			if named, ok := t.Params[0].(*parser.NamedType); ok {
+				capName := named.Name.Lexeme
+				if !c.capabilities[capName] {
+					return nil, c.errorf(named.Name,
+						"unknown capability %q; declare it with `cap %s`", capName, capName)
+				}
+				return &GenType{Con: "cap", Params: []Type{&CapabilityType{Name: capName}}}, nil
+			}
+		}
 		params := make([]Type, len(t.Params))
 		for i, p := range t.Params {
 			resolved, err := c.resolveTypeExpr(p)
@@ -1707,6 +1731,10 @@ func (c *checker) inferCallExpr(e *parser.CallExpr, sc *scope) (Type, error) {
 		if err := c.checkEffectsCompat(ident.Tok, ident.Tok.Lexeme); err != nil {
 			return nil, err
 		}
+		// Capability enforcement: cap(X) functions require cap<X> in scope.
+		if err := c.checkCapCompat(ident.Tok, ident.Tok.Lexeme, sc); err != nil {
+			return nil, err
+		}
 	}
 	if len(e.Args) != len(sig.Params) {
 		return nil, c.errorf(e.LParen,
@@ -1926,6 +1954,49 @@ func (c *checker) unifyTypeExpr(te parser.TypeExpr, concrete Type, typeParams ma
 //   - Caller unannotated (curEffects == nil): no check — gradual adoption.
 //   - Caller pure: callee must also be pure (or unannotated ≡ trusted).
 //   - Caller effects(X): callee's effects must be ⊆ X (unannotated = trusted).
+// checkCapCompat enforces that a call to a cap(X) function is made from a
+// context that holds cap<X>. The caller qualifies if:
+//   - The current function is itself annotated cap(X), OR
+//   - A cap<X> token is visible in the current scope.
+func (c *checker) checkCapCompat(callTok lexer.Token, calleeName string, sc *scope) error {
+	calleeEff := c.fnEffects[calleeName]
+	if calleeEff == nil || calleeEff.Kind != parser.EffectsCap || len(calleeEff.Names) == 0 {
+		return nil
+	}
+	capName := calleeEff.Names[0]
+
+	// Caller is itself a cap(capName) function.
+	if c.curEffects != nil && c.curEffects.Kind == parser.EffectsCap &&
+		len(c.curEffects.Names) > 0 && c.curEffects.Names[0] == capName {
+		return nil
+	}
+
+	// A cap<capName> token is visible in scope.
+	if c.hasCap(sc, capName) {
+		return nil
+	}
+
+	return c.errorf(callTok,
+		"call to cap(%s) function %q requires a cap<%s> token in scope; pass one as a parameter",
+		capName, calleeName, capName)
+}
+
+// hasCap reports whether a variable of type cap<capName> is visible in sc.
+func (c *checker) hasCap(sc *scope, capName string) bool {
+	for s := sc; s != nil; s = s.parent {
+		for _, info := range s.vars {
+			gen, ok := info.typ.(*GenType)
+			if !ok || gen.Con != "cap" || len(gen.Params) == 0 {
+				continue
+			}
+			if ct, ok2 := gen.Params[0].(*CapabilityType); ok2 && ct.Name == capName {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (c *checker) checkEffectsCompat(callTok lexer.Token, calleeName string) error {
 	if c.curEffects == nil || c.curEffects.Kind == parser.EffectsNone {
 		return nil

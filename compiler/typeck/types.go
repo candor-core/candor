@@ -107,6 +107,18 @@ func (g *GenType) Equals(other Type) bool {
 	return true
 }
 
+// ── Capability type ───────────────────────────────────────────────────────────
+
+// CapabilityType is the zero-size proof token for a named capability.
+// cap<Admin> resolves to GenType{Con:"cap", Params:[CapabilityType{Name:"Admin"}]}.
+type CapabilityType struct{ Name string }
+
+func (t *CapabilityType) String() string          { return t.Name }
+func (t *CapabilityType) Equals(other Type) bool {
+	o, ok := other.(*CapabilityType)
+	return ok && o.Name == t.Name
+}
+
 // ── Function type ─────────────────────────────────────────────────────────────
 
 // FnType is a function signature type: fn(T, U) -> V
