@@ -14,6 +14,10 @@
 //	[build]
 //	sources = ["src/lib.cnd", "src/util.cnd"]   # optional; auto-discovered if absent
 //	output  = "bin/myapp"                          # optional; defaults to <name>
+//
+//	[dependencies]
+//	mylib      = "path:../mylib"
+//	remote-pkg = "git:https://github.com/user/repo@v1.0.0"
 package manifest
 
 import (
@@ -23,6 +27,15 @@ import (
 	"path/filepath"
 	"strings"
 )
+
+// Dep is one entry from the [dependencies] section.
+// Source is the raw value string, one of:
+//   - "path:<relative-or-absolute-dir>"
+//   - "git:<url>@<version>"
+type Dep struct {
+	Name   string
+	Source string // e.g. "path:../mylib" or "git:https://github.com/x/y@v1.0.0"
+}
 
 // Manifest holds the parsed contents of a Candor.toml file.
 type Manifest struct {
@@ -34,6 +47,9 @@ type Manifest struct {
 	// Build section
 	Sources []string // explicit source list; empty = auto-discover all *.cnd in src/
 	Output  string   // output binary path; empty = <name> or <name>.exe
+
+	// Dependencies section
+	Deps []Dep // declared dependencies in order
 
 	// Dir is the directory containing Candor.toml (set by Load).
 	Dir string
@@ -92,6 +108,9 @@ func Load(path string) (*Manifest, error) {
 			case "sources":
 				m.Sources = parseStringArray(val)
 			}
+		case "dependencies":
+			// Each line: name = "path:..." or name = "git:..."
+			m.Deps = append(m.Deps, Dep{Name: key, Source: unquote(val)})
 		}
 	}
 	if err := scanner.Err(); err != nil {
@@ -185,6 +204,65 @@ func (m *Manifest) OutputPath(windows bool) string {
 		p += ".exe"
 	}
 	return p
+}
+
+// DepKind classifies a dependency source string.
+type DepKind int
+
+const (
+	DepPath DepKind = iota // "path:<dir>"
+	DepGit                 // "git:<url>@<version>"
+	DepUnknown
+)
+
+// ParseDep splits a dependency source string into its kind, location, and version.
+// For path deps: loc = directory, version = "".
+// For git deps:  loc = URL, version = tag/branch/rev after "@".
+func ParseDep(source string) (kind DepKind, loc, version string) {
+	switch {
+	case strings.HasPrefix(source, "path:"):
+		return DepPath, strings.TrimPrefix(source, "path:"), ""
+	case strings.HasPrefix(source, "git:"):
+		rest := strings.TrimPrefix(source, "git:")
+		if at := strings.LastIndex(rest, "@"); at >= 0 {
+			return DepGit, rest[:at], rest[at+1:]
+		}
+		return DepGit, rest, ""
+	}
+	return DepUnknown, source, ""
+}
+
+// ResolvedDir returns the absolute directory for a path-type dependency,
+// resolved relative to the manifest's Dir.
+func (m *Manifest) ResolvedDir(d Dep) (string, error) {
+	kind, loc, _ := ParseDep(d.Source)
+	if kind != DepPath {
+		return "", fmt.Errorf("dep %q: not a path dependency", d.Name)
+	}
+	if filepath.IsAbs(loc) {
+		return loc, nil
+	}
+	return filepath.Join(m.Dir, loc), nil
+}
+
+// DepSourceFiles returns all .cnd source files contributed by a resolved
+// dependency directory (treats it like a sub-project's src/ discovery).
+func DepSourceFiles(dir string) ([]string, error) {
+	srcDir := filepath.Join(dir, "src")
+	if _, err := os.Stat(srcDir); os.IsNotExist(err) {
+		srcDir = dir
+	}
+	var files []string
+	err := filepath.WalkDir(srcDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && strings.HasSuffix(path, ".cnd") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	return files, err
 }
 
 // unquote strips surrounding double-quotes if present.

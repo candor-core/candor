@@ -34,6 +34,7 @@ Usage:
   candorc build --sanitize=<kind>             enable sanitizer(s): address, undefined, memory, leak, thread
   candorc build --target=<triple>             cross-compile for a specific target triple
   candorc build --target=wasm32               compile to WebAssembly (.wasm via clang/wasm-ld)
+  candorc fetch                               download and pin all [dependencies] → Candor.lock
   candorc fmt   [file.cnd ...]                format source files in-place
   candorc test  [file.cnd ...]                run #test-annotated functions
   candorc lsp                                 start the LSP server (stdin/stdout, JSON-RPC 2.0)
@@ -43,6 +44,10 @@ Usage:
 
 Flags may be combined: candorc build --debug --backend=llvm --sanitize=address,undefined
 Target examples: aarch64-unknown-linux-gnu  x86_64-apple-macosx14.0  wasm32 (alias for wasm32-unknown-unknown)
+
+[dependencies] in Candor.toml:
+  mylib      = "path:../mylib"
+  remote-pkg = "git:https://github.com/user/repo@v1.0.0"
 
 A project is identified by a Candor.toml manifest file.`
 
@@ -67,6 +72,8 @@ func main() {
 		err = cmdMcp(os.Args[2:])
 	case "doc":
 		err = cmdDoc(os.Args[2:])
+	case "fetch":
+		err = cmdFetch(os.Args[2:])
 	case "help", "--help", "-h":
 		fmt.Println(usage)
 	default:
@@ -119,6 +126,29 @@ func cmdBuild(args []string) error {
 	if err != nil {
 		return err
 	}
+
+	// Include source files from locked dependencies (prepend so they are
+	// compiled as library modules before the project's own sources).
+	if len(m.Deps) > 0 {
+		lf, err := manifest.LoadLock(manifest.LockPath(m.Dir))
+		if err != nil {
+			return fmt.Errorf("loading Candor.lock: %w (run 'candorc fetch')", err)
+		}
+		var depFiles []string
+		for _, dep := range m.Deps {
+			lp := lf.Find(dep.Name)
+			if lp == nil {
+				return fmt.Errorf("dependency %q not in Candor.lock — run 'candorc fetch'", dep.Name)
+			}
+			df, err := manifest.DepSourceFiles(lp.Resolved)
+			if err != nil {
+				return fmt.Errorf("dep %q: reading sources from %s: %w", dep.Name, lp.Resolved, err)
+			}
+			depFiles = append(depFiles, df...)
+		}
+		srcFiles = append(depFiles, srcFiles...)
+	}
+
 	if len(srcFiles) == 0 {
 		return fmt.Errorf("no .cnd source files found for project %q", m.Name)
 	}
@@ -135,6 +165,158 @@ func cmdBuild(args []string) error {
 		return runCompileLLVM(srcFiles, outPath, cfg)
 	}
 	return runCompile(srcFiles, outPath, cfg)
+}
+
+// ── candorc fetch ─────────────────────────────────────────────────────────────
+
+// cmdFetch downloads and pins all [dependencies] declared in Candor.toml,
+// writing the resolved paths and git revisions to Candor.lock.
+func cmdFetch(args []string) error {
+	_ = args // no flags yet
+
+	manifestPath, err := manifest.FindManifest(".")
+	if err != nil {
+		return err
+	}
+	if manifestPath == "" {
+		return fmt.Errorf("no Candor.toml found in current directory or any parent")
+	}
+	m, err := manifest.Load(manifestPath)
+	if err != nil {
+		return err
+	}
+
+	if len(m.Deps) == 0 {
+		fmt.Println("candorc fetch: no dependencies declared.")
+		return nil
+	}
+
+	// Load existing lock so we can skip already-resolved deps.
+	lockPath := manifest.LockPath(m.Dir)
+	lf, err := manifest.LoadLock(lockPath)
+	if err != nil {
+		return fmt.Errorf("loading Candor.lock: %w", err)
+	}
+
+	cacheDir, err := candorCacheDir()
+	if err != nil {
+		return err
+	}
+
+	for _, dep := range m.Deps {
+		kind, loc, version := manifest.ParseDep(dep.Source)
+		switch kind {
+		case manifest.DepPath:
+			resolved := loc
+			if !filepath.IsAbs(resolved) {
+				resolved = filepath.Join(m.Dir, resolved)
+			}
+			if _, err := os.Stat(resolved); err != nil {
+				return fmt.Errorf("dep %q: path %q does not exist", dep.Name, resolved)
+			}
+			upsertLocked(lf, manifest.LockedPackage{
+				Name:     dep.Name,
+				Source:   dep.Source,
+				Resolved: resolved,
+			})
+			fmt.Printf("candorc fetch: %s → %s (path)\n", dep.Name, resolved)
+
+		case manifest.DepGit:
+			// Target dir: ~/.candor/pkg/<name>/<version>/
+			safeVer := version
+			if safeVer == "" {
+				safeVer = "latest"
+			}
+			targetDir := filepath.Join(cacheDir, dep.Name, safeVer)
+
+			// If already cloned, pull latest on the same ref instead of re-cloning.
+			rev := ""
+			if _, err := os.Stat(filepath.Join(targetDir, ".git")); err == nil {
+				rev, _ = gitRevParse(targetDir, "HEAD")
+				fmt.Printf("candorc fetch: %s already cached at %s (rev %s)\n", dep.Name, targetDir, shortRev(rev))
+			} else {
+				if err := os.MkdirAll(targetDir, 0o755); err != nil {
+					return fmt.Errorf("dep %q: mkdir %s: %w", dep.Name, targetDir, err)
+				}
+				ref := version
+				if ref == "" {
+					ref = "HEAD"
+				}
+				fmt.Printf("candorc fetch: cloning %s@%s → %s\n", loc, ref, targetDir)
+				cmd := exec.Command("git", "clone", "--depth=1", "--branch="+ref, loc, targetDir)
+				cmd.Stdout = os.Stdout
+				cmd.Stderr = os.Stderr
+				if err := cmd.Run(); err != nil {
+					// Try without --branch (bare clone HEAD) if tag not found.
+					cmd2 := exec.Command("git", "clone", "--depth=1", loc, targetDir)
+					cmd2.Stdout = os.Stdout
+					cmd2.Stderr = os.Stderr
+					if err2 := cmd2.Run(); err2 != nil {
+						return fmt.Errorf("dep %q: git clone failed: %w", dep.Name, err)
+					}
+				}
+				rev, _ = gitRevParse(targetDir, "HEAD")
+			}
+			upsertLocked(lf, manifest.LockedPackage{
+				Name:     dep.Name,
+				Source:   dep.Source,
+				Resolved: targetDir,
+				Rev:      rev,
+			})
+			fmt.Printf("candorc fetch: %s → %s (rev %s)\n", dep.Name, targetDir, shortRev(rev))
+
+		default:
+			return fmt.Errorf("dep %q: unrecognized source scheme %q (expected path: or git:)", dep.Name, dep.Source)
+		}
+	}
+
+	if err := manifest.WriteLock(lockPath, lf); err != nil {
+		return fmt.Errorf("writing Candor.lock: %w", err)
+	}
+	fmt.Printf("candorc fetch: wrote %s\n", lockPath)
+	return nil
+}
+
+// upsertLocked replaces an existing entry or appends a new one.
+func upsertLocked(lf *manifest.LockFile, pkg manifest.LockedPackage) {
+	for i := range lf.Packages {
+		if lf.Packages[i].Name == pkg.Name {
+			lf.Packages[i] = pkg
+			return
+		}
+	}
+	lf.Packages = append(lf.Packages, pkg)
+}
+
+// candorCacheDir returns ~/.candor/pkg, creating it if needed.
+func candorCacheDir() (string, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("cannot determine home directory: %w", err)
+	}
+	dir := filepath.Join(home, ".candor", "pkg")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", fmt.Errorf("cannot create cache dir %s: %w", dir, err)
+	}
+	return dir, nil
+}
+
+// gitRevParse runs "git rev-parse <ref>" in dir and returns the SHA.
+func gitRevParse(dir, ref string) (string, error) {
+	cmd := exec.Command("git", "-C", dir, "rev-parse", ref)
+	out, err := cmd.Output()
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+// shortRev returns the first 8 chars of a git SHA, or the full string if shorter.
+func shortRev(rev string) string {
+	if len(rev) > 8 {
+		return rev[:8]
+	}
+	return rev
 }
 
 // hasFlag reports whether flag appears in args.
