@@ -32,6 +32,7 @@ Usage:
   candorc build --debug                       build with debug info (-g -O0); assertions on
   candorc build --release                     build with optimizations (-O2); assertions off
   candorc build --backend=llvm                build via LLVM IR text (requires clang)
+  candorc build --simd                        enable auto-vectorization for effects(simd) functions (-O3 -ftree-vectorize -march=native)
   candorc build --sanitize=<kind>             enable sanitizer(s): address, undefined, memory, leak, thread
   candorc build --target=<triple>             cross-compile for a specific target triple
   candorc build --target=wasm32               compile to WebAssembly (.wasm via clang/wasm-ld)
@@ -43,7 +44,7 @@ Usage:
   candorc doc   [file.cnd ...]                emit intent.json for #intent-annotated functions
   candorc doc   --html [file.cnd ...]         emit docs.html API reference from /// doc comments
 
-Flags may be combined: candorc build --debug --backend=llvm --sanitize=address,undefined
+Flags may be combined: candorc build --release --simd --backend=llvm --sanitize=address,undefined
 Target examples: aarch64-unknown-linux-gnu  x86_64-apple-macosx14.0  wasm32 (alias for wasm32-unknown-unknown)
 
 [dependencies] in Candor.toml:
@@ -107,6 +108,7 @@ func cmdBuild(args []string) error {
 	cfg := BuildConfig{
 		Release:    hasFlag(args, "--release"),
 		Debug:      hasFlag(args, "--debug"),
+		SIMD:       hasFlag(args, "--simd"),
 		Backend:    "c",
 		Sanitizers: parseSanitizers(args),
 		Target:     parseTarget(args),
@@ -515,7 +517,9 @@ func cmdMcp(args []string) error {
 		return err
 	}
 	type prop struct {
-		Type string `json:"type"`
+		Type     string `json:"type"`
+		Nullable bool   `json:"nullable,omitempty"`
+		Items    *prop  `json:"items,omitempty"`
 	}
 	type inputSchema struct {
 		Type       string          `json:"type"`
@@ -530,6 +534,25 @@ func cmdMcp(args []string) error {
 	type mcpManifest struct {
 		Tools []tool `json:"tools"`
 	}
+	// propFor converts a Candor type expression string to a JSON Schema prop.
+	// Handles: vec<T>→array+items, option<T>→nullable, struct/unknown→object,
+	// primitives→string/boolean/number/integer.
+	var propFor func(t string) prop
+	propFor = func(t string) prop {
+		if strings.HasPrefix(t, "vec<") && strings.HasSuffix(t, ">") {
+			inner := t[4 : len(t)-1]
+			it := propFor(inner)
+			return prop{Type: "array", Items: &it}
+		}
+		if strings.HasPrefix(t, "option<") && strings.HasSuffix(t, ">") {
+			inner := t[7 : len(t)-1]
+			p := propFor(inner)
+			p.Nullable = true
+			return p
+		}
+		return prop{Type: candorTypeToJsonSchema(t)}
+	}
+
 	var tools []tool
 	for _, path := range targets {
 		raw, err := os.ReadFile(path)
@@ -551,7 +574,7 @@ func cmdMcp(args []string) error {
 			props := make(map[string]prop)
 			var required []string
 			for _, p := range fn.Params {
-				props[p.Name.Lexeme] = prop{Type: candorTypeToJsonSchema(typeExprStr(p.Type))}
+				props[p.Name.Lexeme] = propFor(typeExprStr(p.Type))
 				required = append(required, p.Name.Lexeme)
 			}
 			tools = append(tools, tool{
@@ -568,14 +591,24 @@ func cmdMcp(args []string) error {
 	return nil
 }
 
+// candorTypeToJsonSchema converts a Candor type expression string to a JSON Schema
+// type name. Returns "string" for unknown/struct types (safe default).
 func candorTypeToJsonSchema(t string) string {
 	switch t {
-	case "str": return "string"
-	case "bool": return "boolean"
-	case "f64", "f32", "f16", "bf16": return "number"
-	default: return "integer"
+	case "str":
+		return "string"
+	case "bool":
+		return "boolean"
+	case "f64", "f32", "f16", "bf16":
+		return "number"
+	case "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64", "isize", "usize":
+		return "integer"
+	default:
+		// Struct / enum / unknown types → object.
+		return "object"
 	}
 }
+
 
 // ── candorc doc ──────────────────────────────────────────────────────────────
 
@@ -908,11 +941,7 @@ func runCompile(srcPaths []string, outPath string, cfg BuildConfig) error {
 		return renderTypeckError(err, sm)
 	}
 
-	var allDecls []parser.Decl
-	for _, f := range files {
-		allDecls = append(allDecls, f.Decls...)
-	}
-	merged := &parser.File{Name: srcPaths[0], Decls: allDecls}
+	merged := mergeFiles(srcPaths[0], files)
 
 	cSrc, err := emit_c.Emit(merged, res)
 	if err != nil {
@@ -938,6 +967,7 @@ func runCompile(srcPaths []string, outPath string, cfg BuildConfig) error {
 	cmd := exec.Command(cc, ccArgs...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
+	cmd.Env = ccEnv(cc)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("C compiler %q failed: %w", cc, err)
 	}
@@ -1010,6 +1040,7 @@ type BuildConfig struct {
 	Backend    string   // "c" or "llvm"
 	Sanitizers []string // e.g. ["address", "undefined"]
 	Target     string   // LLVM target triple, e.g. "aarch64-unknown-linux-gnu" (empty = host)
+	SIMD       bool     // enable compiler auto-vectorization for effects(simd) functions
 }
 
 // ccFlags returns the CC/clang flags implied by the config.
@@ -1018,6 +1049,11 @@ type BuildConfig struct {
 // sanitizers: -fsanitize=<kind> [+ extra flags per sanitizer]
 func (cfg BuildConfig) ccFlags() []string {
 	var flags []string
+	if cfg.SIMD {
+		// Auto-vectorization: let the C compiler select AVX/NEON/WASM SIMD width.
+		// Applied before release/debug so release+simd gets both -O2 and tree-vectorize.
+		flags = append(flags, "-O3", "-ftree-vectorize", "-march=native")
+	}
 	if cfg.Release {
 		flags = append(flags, "-O2", "-DNDEBUG")
 	} else if cfg.Debug || len(cfg.Sanitizers) > 0 {
@@ -1085,7 +1121,90 @@ func findCC() string {
 	if path, err := exec.LookPath("gcc"); err == nil {
 		return path
 	}
+	// On Windows, check common MSYS2/MinGW installations.
+	if isWindows() {
+		for _, candidate := range []string{
+			`C:\msys64\mingw64\bin\gcc.exe`,
+			`C:\msys64\ucrt64\bin\gcc.exe`,
+			`C:\MinGW\bin\gcc.exe`,
+		} {
+			if _, err := os.Stat(candidate); err == nil {
+				return candidate
+			}
+		}
+	}
 	return "cc"
+}
+
+// mergeFiles combines declarations from multiple parsed files into one, deduplicating
+// fn/struct/enum/const definitions by name so that shared declarations re-declared
+// across module files (e.g. token constants) are emitted only once.
+//
+// A synthetic ModuleDecl is inserted before each file's declarations so the emitter
+// can track which module each struct/enum/fn belongs to (even for root-namespace files
+// where the synthetic marker has an empty Name.Lexeme).
+func mergeFiles(name string, files []*parser.File) *parser.File {
+	var allDecls []parser.Decl
+	seen := map[string]bool{}
+	for _, f := range files {
+		mod := fileModuleName(f)
+		// Insert a module boundary marker before this file's declarations.
+		allDecls = append(allDecls, &parser.ModuleDecl{Name: lexer.Token{Lexeme: mod}})
+		for _, d := range f.Decls {
+			var key string
+			switch dd := d.(type) {
+			case *parser.ModuleDecl:
+				continue // skip original; synthetic boundary above replaces it
+			case *parser.UseDecl:
+				_ = dd
+				continue // use-decls are for the typechecker only; not needed in merged output
+			case *parser.FnDecl:
+				key = "fn:" + mod + "." + dd.Name.Lexeme
+			case *parser.StructDecl:
+				key = "struct:" + mod + "." + dd.Name.Lexeme
+			case *parser.EnumDecl:
+				key = "enum:" + mod + "." + dd.Name.Lexeme
+			case *parser.ConstDecl:
+				key = "const:" + mod + "." + dd.Name.Lexeme
+			}
+			if key != "" && seen[key] {
+				continue
+			}
+			if key != "" {
+				seen[key] = true
+			}
+			allDecls = append(allDecls, d)
+		}
+	}
+	return &parser.File{Name: name, Decls: allDecls}
+}
+
+// fileModuleName returns the module name declared in a file, or "" for root namespace.
+func fileModuleName(f *parser.File) string {
+	for _, d := range f.Decls {
+		if md, ok := d.(*parser.ModuleDecl); ok {
+			return md.Name.Lexeme
+		}
+	}
+	return ""
+}
+
+// ccEnv returns the environment for running the C compiler, augmenting PATH
+// so that a MinGW/MSYS2 gcc can find its own tools (ld.exe, as.exe, etc.).
+func ccEnv(cc string) []string {
+	env := os.Environ()
+	dir := filepath.Dir(cc)
+	// Check whether dir is already on PATH to avoid duplication.
+	pathVar := os.Getenv("PATH")
+	if dir != "." && !strings.Contains(pathVar, dir) {
+		for i, e := range env {
+			if strings.HasPrefix(strings.ToUpper(e), "PATH=") {
+				env[i] = e + string(os.PathListSeparator) + dir
+				break
+			}
+		}
+	}
+	return env
 }
 
 func isWindows() bool {

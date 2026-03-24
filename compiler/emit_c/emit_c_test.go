@@ -290,6 +290,49 @@ func TestMatchOnBool(t *testing.T) {
 	assertContains(t, out, "if (")
 }
 
+// TestMatchImplicitTailReturn verifies that a match expression used as the last
+// (implicit) return value of a function emits "return (__extension__ ({...}))"
+// and not a bare statement. This was a silent bug: the value was computed but
+// discarded, causing the function to return garbage.
+// TestMatchImplicitTailReturn verifies that a match expression used as the last
+// (implicit) return value of a function emits "return (__extension__ ({...}))"
+// and not a bare statement. This was a silent bug: the value was computed but
+// discarded, causing the function to return garbage.
+// TestMatchImplicitTailReturn verifies that a match expression used as the last
+// (implicit) return value of a function emits "return (__extension__ ({...}))"
+// and not a bare statement. This was a silent bug: the value was computed but
+// discarded, causing the function to return garbage.
+//
+// Note: arm bodies must have concrete types. Integer literals in tail-match
+// arms require a typeck contextual-typing fix (tracked separately). Here we
+// use bool arms which have concrete types without inference.
+func TestMatchImplicitTailReturn(t *testing.T) {
+	src := `fn f(b: bool) -> bool { match b { true => false   false => true } }`
+	out := pipeline(t, src)
+	t.Logf("emitted C:\n%s", out)
+	// Must emit a return, not a bare statement expression.
+	assertContains(t, out, "return (__extension__")
+}
+
+// TestMustImplicitTailReturn verifies the same fix for must expressions.
+func TestMustImplicitTailReturn(t *testing.T) {
+	src := `fn unwrap(x: option<u32>) -> u32 { x must { some(v) => v   none => 0 } }`
+	out := pipeline(t, src)
+	t.Logf("emitted C:\n%s", out)
+	assertContains(t, out, "return (__extension__")
+}
+
+// TestMatchTailWithEnsures verifies that an implicit tail match still emits
+// the ensures assert wrapper correctly.
+func TestMatchTailWithEnsures(t *testing.T) {
+	src := `fn f(x: option<u32>) -> u32 ensures result >= 0 { x must { some(v) => v   none => 0 } }`
+	out := pipeline(t, src)
+	t.Logf("emitted C:\n%s", out)
+	assertContains(t, out, "_cnd_result")
+	assertContains(t, out, "assert(")
+	assertContains(t, out, "return _cnd_result")
+}
+
 // ── effects annotations ───────────────────────────────────────────────────────
 
 func TestPureComment(t *testing.T) {

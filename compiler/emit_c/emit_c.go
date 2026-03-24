@@ -27,18 +27,59 @@ import (
 
 // Emit translates a type-checked Candor file to a C source string.
 func Emit(file *parser.File, res *typeck.Result) (string, error) {
-	e := &emitter{res: res}
+	e := &emitter{res: res, fileModule: fileModuleName(file)}
 	if err := e.emitFile(file); err != nil {
 		return "", err
 	}
 	return e.sb.String(), nil
 }
 
+// fileModuleName returns the module name declared in a file, or "" for root.
+func fileModuleName(f *parser.File) string {
+	for _, d := range f.Decls {
+		if md, ok := d.(*parser.ModuleDecl); ok {
+			return md.Name.Lexeme
+		}
+	}
+	return ""
+}
+
+// moduleCName returns the C-safe name for a declaration in the given module.
+// For root-namespace declarations (mod == ""), the name is returned unchanged.
+// For module-scoped declarations, the name is prefixed: "mod_name".
+func moduleCName(mod, name string) string {
+	if mod == "" {
+		return name
+	}
+	return mod + "_" + name
+}
+
+// resLookupStruct finds a StructType in the result, preferring the current file's module.
+func (e *emitter) resLookupStruct(name string) *typeck.StructType {
+	if e.fileModule != "" {
+		if st, ok := e.res.Structs[e.fileModule+"."+name]; ok {
+			return st
+		}
+	}
+	return e.res.Structs[name]
+}
+
+// resLookupEnum finds an EnumType in the result, preferring the current file's module.
+func (e *emitter) resLookupEnum(name string) *typeck.EnumType {
+	if e.fileModule != "" {
+		if et, ok := e.res.Enums[e.fileModule+"."+name]; ok {
+			return et
+		}
+	}
+	return e.res.Enums[name]
+}
+
 // ── emitter ───────────────────────────────────────────────────────────────────
 
 type emitter struct {
-	sb  strings.Builder
-	res *typeck.Result
+	sb         strings.Builder
+	res        *typeck.Result
+	fileModule string // module name of the file being emitted ("" = root)
 	// current function context
 	retIsUnit bool // true when emitting a fn returning unit (C void)
 	isMain    bool // true when emitting the special main function
@@ -50,6 +91,12 @@ type emitter struct {
 
 	emittedTypes  map[string]bool // tracks emitted structs/enums
 	emittingTypes map[string]bool // detects cycles
+	emitStack     []string        // DEBUG: call stack for cycle detection
+
+	// declaredVars tracks C variable names already declared in the current
+	// function scope. Re-declarations (same Candor name bound twice) are
+	// emitted as plain assignments to avoid C "redefinition" errors.
+	declaredVars map[string]bool
 
 	// byRefCaptures holds variable names that are captured by reference in the
 	// lambda currently being emitted. Reads emit (*name), writes emit (*name) = val.
@@ -82,6 +129,7 @@ func (e *emitter) emitFile(file *parser.File) error {
 	e.writeln("#include <time.h>")
 	e.writeln("#include <ctype.h>")
 	e.writeln("#ifdef _WIN32")
+	e.writeln("#  include <windows.h>")
 	e.writeln("#  include <direct.h>")
 	e.writeln("#  define _cnd_mkdir(p) _mkdir(p)")
 	e.writeln("#  include <io.h>")
@@ -105,15 +153,23 @@ func (e *emitter) emitFile(file *parser.File) error {
 	e.writeln("")
 
 	// Forward-declare all structs and enums first so they can reference each other via pointers.
-	for _, decl := range file.Decls {
-		switch d := decl.(type) {
-		case *parser.StructDecl:
-			e.writef("typedef struct %s %s;\n", d.Name.Lexeme, d.Name.Lexeme)
-		case *parser.EnumDecl:
-			e.writef("typedef struct %s %s;\n", d.Name.Lexeme, d.Name.Lexeme)
-		case *parser.CapabilityDecl:
-			// cap<Name> is a zero-size proof token; uint8_t at runtime.
-			e.writef("typedef uint8_t cap_%s;\n", d.Name.Lexeme)
+	// Track the current module via ModuleDecl boundary markers inserted by mergeFiles.
+	{
+		curMod := ""
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *parser.ModuleDecl:
+				curMod = d.Name.Lexeme
+			case *parser.StructDecl:
+				cn := moduleCName(curMod, d.Name.Lexeme)
+				e.writef("typedef struct %s %s;\n", cn, cn)
+			case *parser.EnumDecl:
+				cn := moduleCName(curMod, d.Name.Lexeme)
+				e.writef("typedef struct %s %s;\n", cn, cn)
+			case *parser.CapabilityDecl:
+				// cap<Name> is a zero-size proof token; uint8_t at runtime.
+				e.writef("typedef uint8_t cap_%s;\n", d.Name.Lexeme)
+			}
 		}
 	}
 
@@ -145,26 +201,43 @@ func (e *emitter) emitFile(file *parser.File) error {
 	// Emit enum definitions (tagged unions) and struct definitions.
 	// Since structs can contain structs (and result/map entries) by value,
 	// we must emit them in topological order.
+	// Track module context via ModuleDecl boundary markers inserted by mergeFiles.
 	e.emittedTypes = make(map[string]bool)
 	e.emittingTypes = make(map[string]bool)
-	for _, decl := range file.Decls {
-		switch d := decl.(type) {
-		case *parser.StructDecl:
-			if err := e.ensureStructEmitted(e.res.Structs[d.Name.Lexeme]); err != nil {
-				return err
-			}
-		case *parser.EnumDecl:
-			if err := e.ensureEnumEmitted(e.res.Enums[d.Name.Lexeme]); err != nil {
-				return err
-			}
-		case *parser.FnDecl:
-			// Ensure all types used in the function body are emitted
-			// (e.g. nested result types, local struct literals).
-			for _, typ := range e.res.ExprTypes {
-				if err := e.ensureTypeDependenciesEmitted(typ); err != nil {
+	{
+		curMod := ""
+		for _, decl := range file.Decls {
+			switch d := decl.(type) {
+			case *parser.ModuleDecl:
+				curMod = d.Name.Lexeme
+				e.fileModule = curMod
+			case *parser.StructDecl:
+				e.fileModule = curMod
+				if err := e.ensureStructEmitted(e.resLookupStruct(d.Name.Lexeme)); err != nil {
 					return err
 				}
+			case *parser.EnumDecl:
+				e.fileModule = curMod
+				if err := e.ensureEnumEmitted(e.resLookupEnum(d.Name.Lexeme)); err != nil {
+					return err
+				}
+			case *parser.FnDecl:
+				// Ensure all types used in the function body are emitted
+				// (e.g. nested result types, local struct literals).
+				for _, typ := range e.res.ExprTypes {
+					if err := e.ensureTypeDependenciesEmitted(typ); err != nil {
+						return err
+					}
+				}
 			}
+		}
+	}
+
+	// Ensure struct bodies are emitted for all types appearing in builtin FnSigs
+	// (e.g. vec<str> from str_split) even when not referenced in ExprTypes.
+	for _, t := range e.allUsedTypes() {
+		if err := e.ensureTypeDependenciesEmitted(t); err != nil {
+			return err
 		}
 	}
 
@@ -375,7 +448,7 @@ func (e *emitter) emitLambdaFn(lam *typeck.LambdaInfo) error {
 	e.retType = sig.Ret
 	e.byRefCaptures = byRef
 
-	if err := e.emitBlock(lam.Node.Body, 1); err != nil {
+	if err := e.emitFnBody(lam.Node.Body, 1); err != nil {
 		e.retIsUnit = prevRetIsUnit
 		e.isMain = prevIsMain
 		e.contracts = prevContracts
@@ -540,6 +613,19 @@ func (e *emitter) emitSpawnThunk(sp *typeck.SpawnInfo) error {
 	return nil
 }
 
+// safeVariantField returns the C union-member name for a Candor enum variant.
+// It prefixes with "cnd_" when the variant name would produce a C11 reserved
+// identifier of the form _Bool, _Generic, etc.
+func safeVariantField(name string) string {
+	switch name {
+	case "Bool", "Complex", "Imaginary",
+		"Alignas", "Alignof", "Atomic",
+		"Generic", "Noreturn", "Static_assert", "Thread_local":
+		return "cnd_" + name
+	}
+	return name
+}
+
 func (e *emitter) mangle(s string) string {
 	r := strings.NewReplacer(" ", "_", "*", "ptr", "<", "_", ">", "_", ",", "_", "(", "_", ")", "_", "-", "_")
 	return r.Replace(s)
@@ -653,6 +739,32 @@ func (e *emitter) ringPushBackFnName(elemC string) string {
 
 func (e *emitter) ringPopFrontFnName(elemC string) string {
 	return "_cnd_ring_pop_front_" + e.mangle(elemC)
+}
+
+// concreteResultType resolves a result<_ok,E> or result<T,_err> type by
+// substituting the placeholder with the corresponding parameter from
+// e.retType (the current function's declared return type).  This handles the
+// common case where err(val)/ok(val) is used without a type-context hint and
+// the typechecker leaves a _ok/_err sentinel in ExprTypes.
+func (e *emitter) concreteResultType(gen *typeck.GenType) *typeck.GenType {
+	if len(gen.Params) != 2 {
+		return gen
+	}
+	ret, ok := e.retType.(*typeck.GenType)
+	if !ok || ret.Con != "result" || len(ret.Params) != 2 {
+		return gen
+	}
+	p0, p1 := gen.Params[0], gen.Params[1]
+	if g, ok := p0.(*typeck.GenType); ok && (g.Con == "_ok" || g.Con == "_err") {
+		p0 = ret.Params[0]
+	}
+	if g, ok := p1.(*typeck.GenType); ok && (g.Con == "_ok" || g.Con == "_err") {
+		p1 = ret.Params[1]
+	}
+	if p0 == gen.Params[0] && p1 == gen.Params[1] {
+		return gen
+	}
+	return &typeck.GenType{Con: "result", Params: []typeck.Type{p0, p1}}
 }
 
 func (e *emitter) resultTypeName(gen *typeck.GenType) (string, error) {
@@ -979,7 +1091,7 @@ func (e *emitter) emitMapStructHelpers() error {
 		e.writef("static inline %s %s(void) {\n", mapName, newFn)
 		e.writef("    uint64_t _cap = 16;\n")
 		e.writef("    %s** _b = (%s**)calloc(_cap, sizeof(%s*));\n", entryName, entryName, entryName)
-		e.writef("    return (%s){ _b, 0, _cap };\n", mapName)
+		e.writef("    return (%s){ _b, _cap, 0 };\n", mapName)
 		e.writef("}\n")
 
 		// map_insert
@@ -1549,8 +1661,10 @@ func (e *emitter) ensureStructEmitted(st *typeck.StructType) error {
 		return nil
 	}
 	if e.emittingTypes[st.Name] {
-		return fmt.Errorf("cyclic struct dependency involving %s without using ref<T>", st.Name)
+		return fmt.Errorf("cyclic struct dependency involving %s without using ref<T> (stack: %v)", st.Name, e.emitStack)
 	}
+	e.emitStack = append(e.emitStack, "struct:"+st.Name)
+	defer func() { e.emitStack = e.emitStack[:len(e.emitStack)-1] }()
 	e.emittingTypes[st.Name] = true
 
 	// Ensure all fields are emitted first.
@@ -1594,12 +1708,23 @@ func (e *emitter) ensureEnumEmitted(et *typeck.EnumType) error {
 		return nil
 	}
 	if e.emittingTypes[et.Name] {
-		return fmt.Errorf("cyclic enum dependency involving %s without using ref<T>", et.Name)
+		return fmt.Errorf("cyclic enum dependency involving %s without using ref<T> (stack: %v)", et.Name, e.emitStack)
 	}
+	e.emitStack = append(e.emitStack, "enum:"+et.Name)
+	defer func() { e.emitStack = e.emitStack[:len(e.emitStack)-1] }()
 	e.emittingTypes[et.Name] = true
 
 	for _, v := range et.Variants {
 		for _, fType := range v.Fields {
+			// box<T>, ref<T>, refmut<T> are pointer-sized indirections — they do
+			// not require T to be fully laid out before the enclosing enum can be
+			// defined (the enum stores a pointer, not T inline).  Skip dependency
+			// emission for these to allow mutually-recursive enum types.
+			if gen, ok := fType.(*typeck.GenType); ok {
+				if gen.Con == "box" || gen.Con == "ref" || gen.Con == "refmut" {
+					continue
+				}
+			}
 			if err := e.ensureTypeDependenciesEmitted(fType); err != nil {
 				return err
 			}
@@ -1633,7 +1758,7 @@ func (e *emitter) ensureEnumEmitted(et *typeck.EnumType) error {
 				}
 				e.writef(" %s _%d;", ct, i)
 			}
-			e.writef(" } _%s;\n", v.Name)
+			e.writef(" } _%s;\n", safeVariantField(v.Name))
 		}
 		e.writeln("    } _data;")
 	}
@@ -1662,7 +1787,7 @@ func (e *emitter) ensureEnumEmitted(et *typeck.EnumType) error {
 			e.writef("static inline %s %s_%s(%s) {\n", name, name, v.Name, strings.Join(params, ", "))
 			e.writef("    %s _r; _r._tag = %d;\n", name, v.Tag)
 			for i := range v.Fields {
-				e.writef("    _r._data._%s._%d = _%d;\n", v.Name, i, i)
+				e.writef("    _r._data._%s._%d = _%d;\n", safeVariantField(v.Name), i, i)
 			}
 			e.writeln("    return _r;")
 			e.writeln("}")
@@ -1735,10 +1860,12 @@ func (e *emitter) emitFnDecl(d *parser.FnDecl) error {
 	prevIsMain := e.isMain
 	prevContracts := e.contracts
 	prevRetType := e.retType
+	prevDeclaredVars := e.declaredVars
 	e.retIsUnit = sig.Ret.Equals(typeck.TUnit)
 	e.isMain = d.Name.Lexeme == "main"
 	e.contracts = d.Contracts
 	e.retType = sig.Ret
+	e.declaredVars = make(map[string]bool)
 
 	// Capture old() expressions from ensures clauses at function entry.
 	oldExprs := collectOldExprs(d.Contracts)
@@ -1780,7 +1907,7 @@ func (e *emitter) emitFnDecl(d *parser.FnDecl) error {
 	if isMain {
 		e.writeln("    _cnd_argc = argc; _cnd_argv = argv;")
 	}
-	if err := e.emitBlock(d.Body, 1); err != nil {
+	if err := e.emitFnBody(d.Body, 1); err != nil {
 		return err
 	}
 
@@ -1789,6 +1916,7 @@ func (e *emitter) emitFnDecl(d *parser.FnDecl) error {
 	e.contracts = prevContracts
 	e.retType = prevRetType
 	e.oldVars = prevOldVars
+	e.declaredVars = prevDeclaredVars
 
 	// C main must end with return 0. Only add it when the body doesn't
 	// already end in an explicit return statement.
@@ -1832,7 +1960,7 @@ func (e *emitter) emitGenericInstance(inst *typeck.GenericInstance) error {
 	e.contracts = nil
 	e.retType = sig.Ret
 
-	if err := e.emitBlock(d.Body, 1); err != nil {
+	if err := e.emitFnBody(d.Body, 1); err != nil {
 		e.retIsUnit = prevRetIsUnit
 		e.isMain = prevIsMain
 		e.contracts = prevContracts
@@ -1951,11 +2079,98 @@ func (e *emitter) fnProtoNamed(d *parser.FnDecl) (string, error) {
 func indent(depth int) string { return strings.Repeat("    ", depth) }
 
 func (e *emitter) emitBlock(block *parser.BlockStmt, depth int) error {
+	// Nested C blocks (if/loop/match bodies at depth > 1) introduce a new C
+	// scope. Save and restore declaredVars so inner declarations do not
+	// pollute the outer scope and prevent it from declaring the same name.
+	if depth > 1 && e.declaredVars != nil {
+		saved := make(map[string]bool, len(e.declaredVars))
+		for k, v := range e.declaredVars {
+			saved[k] = v
+		}
+		defer func() { e.declaredVars = saved }()
+	}
 	for _, stmt := range block.Stmts {
 		if err := e.emitStmt(stmt, depth); err != nil {
 			return err
 		}
 	}
+	return nil
+}
+
+// emitFnBody emits the statements of a function body.
+// Unlike emitBlock, it handles implicit tail returns: when the last statement
+// is a bare ExprStmt in a non-unit, non-main function, it is emitted as
+// "return <expr>;" so that functions whose last expression is a match/must
+// expression produce correct C instead of discarding the value.
+func (e *emitter) emitFnBody(block *parser.BlockStmt, depth int) error {
+	stmts := block.Stmts
+	if len(stmts) == 0 {
+		return nil
+	}
+	// Emit all but the last statement normally.
+	for _, stmt := range stmts[:len(stmts)-1] {
+		if err := e.emitStmt(stmt, depth); err != nil {
+			return err
+		}
+	}
+	// Emit the last statement. If it is a bare expression in a non-unit
+	// function, wrap it in a return so that tail match/must expressions
+	// return their value instead of silently discarding it.
+	last := stmts[len(stmts)-1]
+	if !e.retIsUnit && !e.isMain {
+		if es, ok := last.(*parser.ExprStmt); ok {
+			return e.emitTailReturn(es.X, depth)
+		}
+	}
+	return e.emitStmt(last, depth)
+}
+
+// emitTailReturn emits an implicit tail return for a function body expression:
+//
+//	return <expr>;
+//
+// It respects any ensures clauses on the current function, using the same
+// wrapping logic as the explicit ReturnStmt path in emitStmt.
+func (e *emitter) emitTailReturn(expr parser.Expr, depth int) error {
+	ind := indent(depth)
+	// Collect ensures clauses (mirrors ReturnStmt handling in emitStmt).
+	var ensures []parser.ContractClause
+	for _, cc := range e.contracts {
+		if cc.Kind == parser.ContractEnsures {
+			ensures = append(ensures, cc)
+		}
+	}
+	if len(ensures) > 0 {
+		ct, err := e.cType(e.retType)
+		if err != nil {
+			return err
+		}
+		e.writef("%s{\n", ind)
+		e.writef("%s    %s _cnd_result = ", ind, ct)
+		if err := e.emitExpr(expr, &e.sb); err != nil {
+			return err
+		}
+		e.write(";\n")
+		for _, cc := range ensures {
+			prevInEnsures := e.inEnsures
+			e.inEnsures = true
+			e.writef("%s    assert(", ind)
+			if err := e.emitExpr(cc.Expr, &e.sb); err != nil {
+				e.inEnsures = prevInEnsures
+				return err
+			}
+			e.inEnsures = prevInEnsures
+			e.write(");\n")
+		}
+		e.writef("%s    return _cnd_result;\n", ind)
+		e.writef("%s}\n", ind)
+		return nil
+	}
+	e.write(ind + "return ")
+	if err := e.emitExpr(expr, &e.sb); err != nil {
+		return err
+	}
+	e.write(";\n")
 	return nil
 }
 
@@ -2378,7 +2593,26 @@ func (e *emitter) emitLetStmt(s *parser.LetStmt, depth int) error {
 	if err != nil {
 		return err
 	}
-	e.writef("%s%s %s = ", indent(depth), ct, s.Name.Lexeme)
+	// Unit-typed let bindings (e.g. `let _ = expr must { ... none => unit }`) should
+	// not emit a C variable since void variables are invalid in C. Emit as a statement.
+	if ct == "void" {
+		e.write(indent(depth))
+		if err := e.emitExpr(s.Value, &e.sb); err != nil {
+			return err
+		}
+		e.write(";\n")
+		return nil
+	}
+	name := s.Name.Lexeme
+	if e.declaredVars != nil && e.declaredVars[name] {
+		// Variable already declared in this C scope — emit as assignment.
+		e.writef("%s%s = ", indent(depth), name)
+	} else {
+		e.writef("%s%s %s = ", indent(depth), ct, name)
+		if e.declaredVars != nil {
+			e.declaredVars[name] = true
+		}
+	}
 	if err := e.emitExpr(s.Value, &e.sb); err != nil {
 		return err
 	}
@@ -2404,7 +2638,7 @@ func (e *emitter) emitIfStmt(s *parser.IfStmt, depth int) error {
 	switch el := s.Else.(type) {
 	case *parser.IfStmt:
 		// else if — emit without leading indent (we already wrote "} else ")
-		ee := &emitter{res: e.res, retIsUnit: e.retIsUnit, isMain: e.isMain}
+		ee := &emitter{res: e.res, retIsUnit: e.retIsUnit, isMain: e.isMain, retType: e.retType, declaredVars: make(map[string]bool)}
 		if err := ee.emitIfStmt(el, depth); err != nil {
 			return err
 		}
@@ -2446,6 +2680,9 @@ func (e *emitter) emitExpr(expr parser.Expr, sb *strings.Builder) error {
 		if name == "unit" {
 			// Should not reach here (handled at call sites), but be safe.
 			sb.WriteString("/* unit */")
+		} else if name == "none" {
+			// none is the absent value for option<T>; represented as NULL in C.
+			sb.WriteString("NULL")
 		} else if e.inEnsures && name == "result" {
 			sb.WriteString("_cnd_result")
 		} else if e.byRefCaptures[name] {
@@ -2537,13 +2774,13 @@ func (e *emitter) emitExpr(expr parser.Expr, sb *strings.Builder) error {
 			}
 		}
 		e.writeln(indent(2) + "0;")
-		// Extract the newly appended content from e.sb and write into local sb.
-		sb.WriteString(e.sb.String()[before:])
-		// Trim the content we just moved out of e.sb by resetting to before.
-		// strings.Builder has no truncate, so rebuild from the prefix.
-		prefix := e.sb.String()[:before]
+		// Save both halves before touching e.sb — sb may be &e.sb itself.
+		full := e.sb.String()
+		stmtsStr := full[before:]
+		oldStr := full[:before]
 		e.sb.Reset()
-		e.sb.WriteString(prefix)
+		e.sb.WriteString(oldStr)
+		sb.WriteString(stmtsStr)
 		sb.WriteString(indent(1) + "})")
 
 	case *parser.CallExpr:
@@ -2953,11 +3190,17 @@ func (e *emitter) emitExpr(expr parser.Expr, sb *strings.Builder) error {
 		}
 
 	case *parser.StructLitExpr:
+		// Use the resolved C type name (handles module-prefixed types like typeck_Type).
+		exprType := e.res.ExprTypes[ex]
+		cStructName, err := e.cType(exprType)
+		if err != nil {
+			return err
+		}
 		if ex.Base != nil {
 			// Struct update: ({ TypeName _tmp = base; _tmp.f1 = v1; ...; _tmp; })
 			tmpName := e.freshTmp()
 			sb.WriteString("({ ")
-			sb.WriteString(ex.TypeName.Lexeme)
+			sb.WriteString(cStructName)
 			sb.WriteString(" ")
 			sb.WriteString(tmpName)
 			sb.WriteString(" = ")
@@ -2979,7 +3222,7 @@ func (e *emitter) emitExpr(expr parser.Expr, sb *strings.Builder) error {
 			sb.WriteString("; })")
 		} else {
 			sb.WriteByte('(')
-			sb.WriteString(ex.TypeName.Lexeme)
+			sb.WriteString(cStructName)
 			sb.WriteString("){ ")
 			for i, fi := range ex.Fields {
 				if i > 0 {
@@ -3857,6 +4100,7 @@ func (e *emitter) emitBuiltinCall(name string, args []parser.Expr, sb *strings.B
 			"(__extension__ ({ __auto_type _da = &(%s); __auto_type _db = &(%s); "+
 				"%s _acc = 0; "+
 				"int64_t _n = _da->_size < _db->_size ? _da->_size : _db->_size; "+
+				"_Pragma(\"GCC ivdep\") "+
 				"for (int64_t _i = 0; _i < _n; _i++) _acc += _da->_data[_i] * _db->_data[_i]; "+
 				"_acc; }))",
 			aB.String(), bB.String(), elemC)
@@ -3886,6 +4130,7 @@ func (e *emitter) emitBuiltinCall(name string, args []parser.Expr, sb *strings.B
 		fmt.Fprintf(sb,
 			"(__extension__ ({ __auto_type _la = &(%s); "+
 				"%s _acc = 0; "+
+				"_Pragma(\"GCC ivdep\") "+
 				"for (int64_t _i = 0; _i < _la->_size; _i++) _acc += _la->_data[_i] * _la->_data[_i]; "+
 				"(%s)sqrt((double)_acc); }))",
 			aB.String(), elemC, elemC)
@@ -3919,6 +4164,7 @@ func (e *emitter) emitBuiltinCall(name string, args []parser.Expr, sb *strings.B
 			"(__extension__ ({ __auto_type _ca = &(%s); __auto_type _cb = &(%s); "+
 				"%s _dot = 0, _na = 0, _nb = 0; "+
 				"int64_t _n = _ca->_size < _cb->_size ? _ca->_size : _cb->_size; "+
+				"_Pragma(\"GCC ivdep\") "+
 				"for (int64_t _i = 0; _i < _n; _i++) { "+
 				"_dot += _ca->_data[_i] * _cb->_data[_i]; "+
 				"_na += _ca->_data[_i] * _ca->_data[_i]; "+
@@ -3949,6 +4195,7 @@ func (e *emitter) emitBuiltinCall(name string, args []parser.Expr, sb *strings.B
 				"for (int64_t _i = 0; _i < _M; _i++) "+
 				"for (int64_t _j = 0; _j < _N; _j++) { "+
 				"__auto_type _s = _mo->_data[_i*_N+_j]; "+
+				"_Pragma(\"GCC ivdep\") "+
 				"for (int64_t _k = 0; _k < _K; _k++) _s += _ma->_data[_i*_K+_k] * _mb->_data[_k*_N+_j]; "+
 				"_mo->_data[_i*_N+_j] = _s; } }))",
 			aB.String(), bB.String(), outB.String())
@@ -5044,17 +5291,28 @@ func (e *emitter) emitConstructorCall(ex *parser.CallExpr, fn *parser.IdentExpr,
 		if !ok || resType.Con != "result" {
 			return false, nil
 		}
+		resType = e.concreteResultType(resType)
 		structName, err := e.resultTypeName(resType)
+		if err != nil {
+			return true, err
+		}
+		// When OK type is unit, result<unit,E> has no _ok_val field.
+		okArgType := e.res.ExprTypes[ex.Args[0]]
+		okArgC, err := e.cType(okArgType)
 		if err != nil {
 			return true, err
 		}
 		sb.WriteByte('(')
 		sb.WriteString(structName)
-		sb.WriteString("){ ._ok = 1, ._ok_val = ")
-		if err := e.emitExpr(ex.Args[0], sb); err != nil {
-			return true, err
+		if okArgC == "void" {
+			sb.WriteString("){ ._ok = 1 }")
+		} else {
+			sb.WriteString("){ ._ok = 1, ._ok_val = ")
+			if err := e.emitExpr(ex.Args[0], sb); err != nil {
+				return true, err
+			}
+			sb.WriteByte('}')
 		}
-		sb.WriteByte('}')
 		return true, nil
 
 	case lexer.TokErr:
@@ -5065,6 +5323,7 @@ func (e *emitter) emitConstructorCall(ex *parser.CallExpr, fn *parser.IdentExpr,
 		if !ok || resType.Con != "result" {
 			return false, nil
 		}
+		resType = e.concreteResultType(resType)
 		structName, err := e.resultTypeName(resType)
 		if err != nil {
 			return true, err
@@ -5135,6 +5394,9 @@ func (e *emitter) emitMustOrMatch(x parser.Expr, arms []parser.MustArm, bodyType
 
 	var bodyC string
 	if bodyType != nil && !bodyType.Equals(typeck.TUnit) && !bodyType.Equals(typeck.TNever) {
+		if gen, ok := bodyType.(*typeck.GenType); ok && gen.Con == "result" {
+			bodyType = e.concreteResultType(gen)
+		}
 		ct, err := e.cType(bodyType)
 		if err != nil {
 			return err
@@ -5181,34 +5443,50 @@ func (e *emitter) emitMustOrMatch(x parser.Expr, arms []parser.MustArm, bodyType
 		// BlockExpr arms emit their statements directly into sb.
 		if blkArm, ok := arm.Body.(*parser.BlockExpr); ok {
 			for _, stmt := range blkArm.Stmts {
-				// Redirect: temporarily make e.sb point at sb so emitStmt writes there.
-				// We capture the old content, emit, then merge new content to sb.
+				// emitStmt always writes to e.sb. We capture what it adds, then
+				// forward it to sb (which may be &e.sb itself when this match is
+				// emitted at statement level — so we must save both halves before
+				// touching e.sb, otherwise the reset discards the new content).
 				before := e.sb.Len()
 				if err := e.emitStmt(stmt, 2); err != nil {
 					return err
 				}
-				newContent := e.sb.String()[before:]
-				// Prepend 8 spaces indent to each line for natural indentation.
-				fmt.Fprintf(sb, "        ")
-				fmt.Fprint(sb, newContent)
-				// Trim new content from e.sb.
-				oldContent := e.sb.String()[:before]
+				full := e.sb.String()
+				stmtStr := full[before:] // what emitStmt wrote (already depth-2 indented)
+				oldStr := full[:before]  // content that was there before emitStmt
+				// Restore e.sb to its pre-emitStmt state.
 				e.sb.Reset()
-				e.sb.WriteString(oldContent)
+				e.sb.WriteString(oldStr)
+				// Forward the stmt output to sb.  If sb == &e.sb this appends
+				// correctly after the restored content; if sb is a different builder
+				// it simply appends there.
+				fmt.Fprint(sb, stmtStr)
 			}
 			// BlockExpr arms yield unit; no result assignment needed.
 			_ = armType
 		} else {
-			var bodyExpr strings.Builder
-			if err := e.emitExpr(arm.Body, &bodyExpr); err != nil {
-				return err
+			// Skip unit-typed ident bodies (e.g. `ok(v) => v` when v:unit) — they have
+			// no side effects and v may not be declared (void vars are invalid in C).
+			isUnitIdent := func() bool {
+				if _, isIdent := arm.Body.(*parser.IdentExpr); !isIdent {
+					return false
+				}
+				return armType != nil && armType.Equals(typeck.TUnit)
 			}
-			if armType != nil && armType.Equals(typeck.TNever) {
-				fmt.Fprintf(sb, "        %s;\n", bodyExpr.String())
-			} else if bodyC != "" {
-				fmt.Fprintf(sb, "        %s = %s;\n", res, bodyExpr.String())
+			if isUnitIdent() {
+				// No-op: unit identity arm has no side effects and no C representation.
 			} else {
-				fmt.Fprintf(sb, "        %s;\n", bodyExpr.String())
+				var bodyExpr strings.Builder
+				if err := e.emitExpr(arm.Body, &bodyExpr); err != nil {
+					return err
+				}
+				if armType != nil && armType.Equals(typeck.TNever) {
+					fmt.Fprintf(sb, "        %s;\n", bodyExpr.String())
+				} else if bodyC != "" {
+					fmt.Fprintf(sb, "        %s = %s;\n", res, bodyExpr.String())
+				} else {
+					fmt.Fprintf(sb, "        %s;\n", bodyExpr.String())
+				}
 			}
 		}
 	}
@@ -5274,13 +5552,22 @@ func (e *emitter) patternCondAndBinding(pattern parser.Expr, xType typeck.Type, 
 
 	case *parser.PathExpr:
 		// Unit enum variant pattern: Shape::Point
-		cond = fmt.Sprintf("%s._tag == %s_tag_%s", tmp, p.Head.Lexeme, p.Tail.Lexeme)
+		// Use the resolved C name from xType (handles module-prefixed enums like typeck_Expr).
+		enumCName, err := e.cType(xType)
+		if err != nil {
+			return "", "", err
+		}
+		cond = fmt.Sprintf("%s._tag == %s_tag_%s", tmp, enumCName, p.Tail.Lexeme)
 		return cond, "", nil
 
 	case *parser.CallExpr:
 		// Enum variant pattern with bindings: Shape::Circle(r)
 		if path, ok2 := p.Fn.(*parser.PathExpr); ok2 {
-			cond = fmt.Sprintf("%s._tag == %s_tag_%s", tmp, path.Head.Lexeme, path.Tail.Lexeme)
+			enumCName, err := e.cType(xType)
+			if err != nil {
+				return "", "", err
+			}
+			cond = fmt.Sprintf("%s._tag == %s_tag_%s", tmp, enumCName, path.Tail.Lexeme)
 			var bindings []string
 			for i, arg := range p.Args {
 				if v, ok3 := arg.(*parser.IdentExpr); ok3 && v.Tok.Lexeme != "_" {
@@ -5292,7 +5579,7 @@ func (e *emitter) patternCondAndBinding(pattern parser.Expr, xType typeck.Type, 
 						}
 						bindings = append(bindings,
 							fmt.Sprintf("%s %s = %s._data._%s._%d;",
-								ct, v.Tok.Lexeme, tmp, path.Tail.Lexeme, i))
+								ct, v.Tok.Lexeme, tmp, safeVariantField(path.Tail.Lexeme), i))
 					}
 				}
 			}
@@ -5403,6 +5690,16 @@ func (e *emitter) cType(t typeck.Type) (string, error) {
 
 	switch tt := t.(type) {
 	case *typeck.GenType:
+		// Resolve _ok/_err sentinels using the current function's return type.
+		if tt.Con == "_ok" || tt.Con == "_err" {
+			if ret, ok := e.retType.(*typeck.GenType); ok && ret.Con == "result" && len(ret.Params) == 2 {
+				if tt.Con == "_ok" {
+					return e.cType(ret.Params[0])
+				}
+				return e.cType(ret.Params[1])
+			}
+			return "", fmt.Errorf("_ok/_err placeholder unresolvable (retType=%v)", e.retType)
+		}
 		switch tt.Con {
 		case "ref", "refmut":
 			if len(tt.Params) == 1 {
@@ -5624,7 +5921,7 @@ func (e *emitter) emitMethodDecl(mangledName string, d *parser.FnDecl) error {
 	e.isMain = false
 	e.contracts = d.Contracts
 	e.retType = sig.Ret
-	if err := e.emitBlock(d.Body, 1); err != nil {
+	if err := e.emitFnBody(d.Body, 1); err != nil {
 		e.retIsUnit = prevRetIsUnit
 		e.isMain = prevIsMain
 		e.contracts = prevContracts

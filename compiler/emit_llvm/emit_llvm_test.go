@@ -34,6 +34,25 @@ func compileLL(t *testing.T, src string) string {
 	return out
 }
 
+// compileLLErr runs the full pipeline and returns the emitter error (if any).
+// Unlike compileLL it does not call t.Fatal on emit errors.
+func compileLLErr(t *testing.T, src string) (string, error) {
+	t.Helper()
+	tokens, err := lexer.Tokenize("test.cnd", src)
+	if err != nil {
+		t.Fatalf("lex: %v", err)
+	}
+	file, err := parser.Parse("test.cnd", tokens)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	res, err := typeck.Check(file)
+	if err != nil {
+		t.Fatalf("typeck: %v", err)
+	}
+	return emit_llvm.EmitLLVM(file, res, "")
+}
+
 func assertContains(t *testing.T, haystack, needle string) {
 	t.Helper()
 	if !strings.Contains(haystack, needle) {
@@ -393,6 +412,33 @@ fn f() -> i64 {
 	assertContains(t, out, `call ptr @malloc`)
 	assertContains(t, out, `load i64, ptr`)
 	assertContains(t, out, `ret i64`)
+}
+
+func TestEmitRingPopFront(t *testing.T) {
+	out := compileLL(t, `
+fn pop_first(r: ring<i64>) -> option<i64> {
+	return ring_pop_front(r)
+}`)
+	assertContains(t, out, `ring.pop.empty`)
+	assertContains(t, out, `ring.pop.do`)
+	assertContains(t, out, `ring.pop.done`)
+	assertContains(t, out, `icmp eq i64`)
+	assertContains(t, out, `call ptr @malloc`)
+	assertContains(t, out, `phi ptr`)
+}
+
+func TestEmitMapNewErrors(t *testing.T) {
+	_, err := compileLLErr(t, `
+fn f() -> unit {
+	let m: map<i64, i64> = map_new()
+	return unit
+}`)
+	if err == nil {
+		t.Fatal("expected compile error for map_new in LLVM backend, got none")
+	}
+	if !strings.Contains(err.Error(), "map_new") {
+		t.Errorf("expected error to mention 'map_new', got: %v", err)
+	}
 }
 
 func TestEmitBoxDrop(t *testing.T) {

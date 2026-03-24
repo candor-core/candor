@@ -1373,11 +1373,14 @@ func (em *llEmitter) emitForStmt(s *parser.ForStmt) error {
 		delete(em.localTypes, s.Var2.Lexeme)
 
 	default:
-		em.wi(`; TODO: for-in over set not yet supported in LLVM backend`)
+		// set<T> for-in is not yet implemented in the LLVM backend.
+		// Emit placeholder labels so the IR stays syntactically valid,
+		// then return an error so the user gets a clear message.
 		em.lbl(hdrLbl)
 		em.lbl(incrLbl)
 		em.lbl(bodyLbl)
 		em.lbl(exitLbl)
+		return fmt.Errorf("emit_llvm: for-in over set<T> is not yet implemented; use --backend=c")
 	}
 
 	em.breakLabel = oldBreak
@@ -1445,7 +1448,7 @@ func (em *llEmitter) emitIndexAssignStmt(s *parser.IndexAssignStmt) error {
 		em.wif(`store %s %s, ptr %s`, em.llType(elemTy), newVal, epReg)
 
 	default:
-		em.wi(`; TODO: index-assign on map/set not yet supported in LLVM backend`)
+		return fmt.Errorf("emit_llvm: index-assign on %s is not yet implemented; use --backend=c", gen.Con)
 	}
 	return nil
 }
@@ -2293,18 +2296,104 @@ func (em *llEmitter) emitBuiltinCall(e *parser.CallExpr, name string) (string, b
 		em.lbl(doneLbl)
 		return "undef", true, nil
 
-	// ── map / set stubs (not yet implemented in LLVM backend) ────────────────
+	// ── map / set — not yet implemented in LLVM backend ────────────────────
+	// These return a proper error so callers get a clear message instead of
+	// silent undef behaviour that produces cryptic runtime crashes.
 
-	case "map_new", "map_insert", "map_get", "map_remove", "map_len", "map_contains",
-		"set_new", "set_add", "set_remove", "set_contains", "set_len":
-		em.wif(`; TODO: %s not yet implemented in LLVM backend`, name)
-		return "undef", true, nil
+	case "map_new", "map_insert", "map_get", "map_remove", "map_len", "map_contains":
+		return "undef", true,
+			fmt.Errorf("emit_llvm: %s is not yet implemented in the LLVM backend; use --backend=c", name)
 
-	// ── ring ops not yet implemented ─────────────────────────────────────────
+	case "set_new", "set_add", "set_remove", "set_contains", "set_len":
+		return "undef", true,
+			fmt.Errorf("emit_llvm: %s is not yet implemented in the LLVM backend; use --backend=c", name)
+
+	// ── ring_pop_front ────────────────────────────────────────────────────────
+	// ring_pop_front(r) → option<T> (nullable ptr: null = none, non-null = some)
+	// %_cnd_ring = { ptr _data(0), i64 _cap(1), i64 _head(2), i64 _len(3) }
 
 	case "ring_pop_front":
-		em.wif(`; TODO: ring_pop_front not yet implemented in LLVM backend`)
-		return "undef", true, nil
+		if len(e.Args) < 1 {
+			return "undef", true, nil
+		}
+		ringTy, ok := em.res.ExprTypes[e.Args[0]].(*typeck.GenType)
+		if !ok || len(ringTy.Params) == 0 {
+			return "undef", true, nil
+		}
+		elemTy := ringTy.Params[0]
+		llElem := em.llType(elemTy)
+
+		ringAddr, err := em.emitAddr(e.Args[0])
+		if err != nil {
+			return "undef", true, err
+		}
+
+		dataSlot := em.fresh()
+		capSlot := em.fresh()
+		headSlot := em.fresh()
+		lenSlot := em.fresh()
+		em.wif(`%s = getelementptr %%_cnd_ring, ptr %s, i32 0, i32 0`, dataSlot, ringAddr)
+		em.wif(`%s = getelementptr %%_cnd_ring, ptr %s, i32 0, i32 1`, capSlot, ringAddr)
+		em.wif(`%s = getelementptr %%_cnd_ring, ptr %s, i32 0, i32 2`, headSlot, ringAddr)
+		em.wif(`%s = getelementptr %%_cnd_ring, ptr %s, i32 0, i32 3`, lenSlot, ringAddr)
+
+		lenReg := em.fresh()
+		em.wif(`%s = load i64, ptr %s`, lenReg, lenSlot)
+
+		emptyLbl := em.freshBlk("ring.pop.empty")
+		popLbl := em.freshBlk("ring.pop.do")
+		doneLbl := em.freshBlk("ring.pop.done")
+
+		isEmpty := em.fresh()
+		em.wif(`%s = icmp eq i64 %s, 0`, isEmpty, lenReg)
+		em.wif(`br i1 %s, label %%%s, label %%%s`, isEmpty, emptyLbl, popLbl)
+
+		// Empty path — return null (none).
+		em.lbl(emptyLbl)
+		em.wif(`br label %%%s`, doneLbl)
+
+		// Non-empty path — pop front.
+		em.lbl(popLbl)
+		dataReg := em.fresh()
+		capReg := em.fresh()
+		headReg := em.fresh()
+		em.wif(`%s = load ptr, ptr %s`, dataReg, dataSlot)
+		em.wif(`%s = load i64, ptr %s`, capReg, capSlot)
+		em.wif(`%s = load i64, ptr %s`, headReg, headSlot)
+
+		// Load element at data[head].
+		elemPtr := em.fresh()
+		elemVal := em.fresh()
+		em.wif(`%s = getelementptr %s, ptr %s, i64 %s`, elemPtr, llElem, dataReg, headReg)
+		em.wif(`%s = load %s, ptr %s`, elemVal, llElem, elemPtr)
+
+		// Advance head = (head + 1) % cap.
+		head1 := em.fresh()
+		newHead := em.fresh()
+		em.wif(`%s = add i64 %s, 1`, head1, headReg)
+		em.wif(`%s = urem i64 %s, %s`, newHead, head1, capReg)
+		em.wif(`store i64 %s, ptr %s`, newHead, headSlot)
+
+		// Decrement len.
+		newLen := em.fresh()
+		em.wif(`%s = sub i64 %s, 1`, newLen, lenReg)
+		em.wif(`store i64 %s, ptr %s`, newLen, lenSlot)
+
+		// Heap-allocate the return value (option<T> = T*).
+		szPtr := em.fresh()
+		szVal := em.fresh()
+		allocBuf := em.fresh()
+		em.wif(`%s = getelementptr %s, ptr null, i64 1`, szPtr, llElem)
+		em.wif(`%s = ptrtoint ptr %s to i64`, szVal, szPtr)
+		em.wif(`%s = call ptr @malloc(i64 %s)`, allocBuf, szVal)
+		em.wif(`store %s %s, ptr %s`, llElem, elemVal, allocBuf)
+		em.wif(`br label %%%s`, doneLbl)
+
+		// Merge: phi selects null vs malloc'd pointer.
+		em.lbl(doneLbl)
+		result := em.fresh()
+		em.wif(`%s = phi ptr [ null, %%%s ], [ %s, %%%s ]`, result, emptyLbl, allocBuf, popLbl)
+		return result, true, nil
 	}
 
 	return "", false, nil

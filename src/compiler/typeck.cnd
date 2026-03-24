@@ -2,6 +2,8 @@
 ##
 ## Input:  ParsedFile (from parser.cnd)
 ## Output: result<TypedFile, str>
+
+module typeck
 ##
 ## Phased build — each phase verified before the next appends.
 ## Phase 1: type representation, type environment, type resolution.
@@ -25,22 +27,23 @@ fn TY_STR()     -> i64 pure { return 14 }
 fn TY_UNIT()    -> i64 pure { return 15 }
 
 ## ── type kind tags ────────────────────────────────────────────────────────────
+## Named TYK_* (Type Kind) to avoid collision with lexer's TK_* (Token Kind).
 fn TK_PRIM()   -> i64 pure { return 1 }  ## i64, bool, str, ...
 fn TK_GEN()    -> i64 pure { return 2 }  ## vec<T>, option<T>, result<T,E>, ...
-fn TK_FN()     -> i64 pure { return 3 }  ## fn(A,B) -> R
+fn TYK_FN()    -> i64 pure { return 3 }  ## fn(A,B) -> R
 fn TK_NAMED()  -> i64 pure { return 4 }  ## user struct or enum (looked up by name)
 fn TK_VAR()    -> i64 pure { return 5 }  ## unresolved type variable (for generics)
-fn TK_NONE()   -> i64 pure { return 6 }  ## the bare `none` literal type
+fn TYK_NONE()  -> i64 pure { return 6 }  ## the bare `none` literal type
 
 ## ── Type ──────────────────────────────────────────────────────────────────────
 ## A single flat struct covering all type shapes.
-## kind == TK_PRIM  → prim field holds TY_* tag
-## kind == TK_GEN   → name = constructor ("vec","option","result","box",...)
-##                     params = type arguments
-## kind == TK_FN    → params = param types, fn_ret = return type
-## kind == TK_NAMED → name = struct/enum name
-## kind == TK_VAR   → name = type variable name
-## kind == TK_NONE  → the polymorphic none; coerces to option<T>
+## kind == TK_PRIM   → prim field holds TY_* tag
+## kind == TK_GEN    → name = constructor ("vec","option","result","box",...)
+##                      params = type arguments
+## kind == TYK_FN    → params = param types, fn_ret = return type
+## kind == TK_NAMED  → name = struct/enum name
+## kind == TK_VAR    → name = type variable name
+## kind == TYK_NONE  → the polymorphic none; coerces to option<T>
 
 struct Type {
     kind:   i64
@@ -65,7 +68,7 @@ fn ty_var(name: str) -> Type {
 }
 
 fn ty_none() -> Type {
-    return Type{ kind: TK_NONE(), prim: 0, name: "none", params: vec_new(), fn_ret: none }
+    return Type{ kind: TYK_NONE(), prim: 0, name: "none", params: vec_new(), fn_ret: none }
 }
 
 fn ty_gen(con: str, params: vec<Type>) -> Type {
@@ -86,7 +89,7 @@ fn ty_gen2(con: str, a: Type, b: Type) -> Type {
 }
 
 fn ty_fn(params: vec<Type>, ret: Type) -> Type {
-    return Type{ kind: TK_FN(), prim: 0, name: "", params: params, fn_ret: some(box_new(ret)) }
+    return Type{ kind: TYK_FN(), prim: 0, name: "", params: params, fn_ret: some(box_new(ret)) }
 }
 
 ## ── well-known type singletons ────────────────────────────────────────────────
@@ -130,7 +133,7 @@ fn ty_show(t: Type) -> str {
     }
     if t.kind == TK_NAMED() { return t.name }
     if t.kind == TK_VAR()   { return t.name }
-    if t.kind == TK_NONE()  { return "none" }
+    if t.kind == TYK_NONE()  { return "none" }
     if t.kind == TK_GEN() {
         let n = vec_len(t.params) as i64
         if n == 0 { return t.name }
@@ -144,7 +147,7 @@ fn ty_show(t: Type) -> str {
         }
         return str_concat(s, ">")
     }
-    if t.kind == TK_FN() {
+    if t.kind == TYK_FN() {
         let mut s = "fn("
         let n = vec_len(t.params) as i64
         let mut i: i64 = 0
@@ -170,7 +173,7 @@ fn ty_eq(a: Type, b: Type) -> bool {
     if a.kind == TK_PRIM()  { return a.prim == b.prim }
     if a.kind == TK_NAMED() { return str_eq(a.name, b.name) }
     if a.kind == TK_VAR()   { return str_eq(a.name, b.name) }
-    if a.kind == TK_NONE()  { return true }
+    if a.kind == TYK_NONE()  { return true }
     if a.kind == TK_GEN() {
         if not str_eq(a.name, b.name) { return false }
         let na = vec_len(a.params) as i64
@@ -184,7 +187,7 @@ fn ty_eq(a: Type, b: Type) -> bool {
         }
         return true
     }
-    if a.kind == TK_FN() {
+    if a.kind == TYK_FN() {
         let na = vec_len(a.params) as i64
         let nb = vec_len(b.params) as i64
         if na != nb { return false }
@@ -204,7 +207,7 @@ fn ty_eq(a: Type, b: Type) -> bool {
 ## none coerces to option<T> for any T
 fn ty_coerce(src: Type, dst: Type) -> bool {
     if ty_eq(src, dst) { return true }
-    if src.kind == TK_NONE() {
+    if src.kind == TYK_NONE() {
         if dst.kind == TK_GEN() and str_eq(dst.name, "option") { return true }
     }
     return false

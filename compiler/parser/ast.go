@@ -655,8 +655,10 @@ type TypeExpr interface {
 }
 
 // NamedType: u32, unit, bool, str, MyStruct
+// For module-qualified references (parsed.Expr), Module is non-nil.
 type NamedType struct {
-	Name lexer.Token
+	Module *lexer.Token // non-nil for "module.TypeName" references
+	Name   lexer.Token
 }
 
 func (t *NamedType) Pos() lexer.Token { return t.Name }

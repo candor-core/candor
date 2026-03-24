@@ -1412,6 +1412,16 @@ func (p *parser) parseType() (TypeExpr, error) {
 		// `secret` and `cap` are keywords but also valid as generic type constructors
 		// in type position: e.g. secret<T>, cap<Admin>.
 		name := p.advance()
+		// Module-qualified type: parsed.Expr — consume dot + ident.
+		if p.check(lexer.TokDot) && p.peekAt(1).Type == lexer.TokIdent {
+			p.advance() // consume '.'
+			typeName, err := p.expect(lexer.TokIdent)
+			if err != nil {
+				return nil, err
+			}
+			modCopy := name
+			return &NamedType{Module: &modCopy, Name: typeName}, nil
+		}
 		if p.check(lexer.TokLt) {
 			return p.parseGenericType(name)
 		}

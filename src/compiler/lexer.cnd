@@ -608,7 +608,7 @@ fn token_kind_name(k: i64) -> str {
 
 ## ── standalone driver (optional — compile with --entry=main) ─────────────────
 ## Reads source from stdin, prints LINE TAB KIND TAB LEXEME for each token.
-fn main() -> unit {
+fn lexer_main() -> unit {
     let mut src: str = ""
     loop {
         let line = try_read_line() must {

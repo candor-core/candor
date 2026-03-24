@@ -266,13 +266,19 @@ func (c *checker) checkProgram(files []*parser.File) error {
 		for _, d := range f.Decls {
 			switch decl := d.(type) {
 			case *parser.StructDecl:
-				st := &StructType{Name: decl.Name.Lexeme, Fields: make(map[string]Type)}
-				c.structs[decl.Name.Lexeme] = st
-				c.symModule[decl.Name.Lexeme] = mod
+				key, cName := qualKey(mod, decl.Name.Lexeme)
+				st := &StructType{Name: cName, Fields: make(map[string]Type)}
+				c.structs[key] = st
+				if _, exists := c.symModule[decl.Name.Lexeme]; !exists {
+					c.symModule[decl.Name.Lexeme] = mod
+				}
 			case *parser.EnumDecl:
-				et := &EnumType{Name: decl.Name.Lexeme, ByName: make(map[string]*EnumVariantDef)}
-				c.enums[decl.Name.Lexeme] = et
-				c.symModule[decl.Name.Lexeme] = mod
+				key, cName := qualKey(mod, decl.Name.Lexeme)
+				et := &EnumType{Name: cName, ByName: make(map[string]*EnumVariantDef)}
+				c.enums[key] = et
+				if _, exists := c.symModule[decl.Name.Lexeme]; !exists {
+					c.symModule[decl.Name.Lexeme] = mod
+				}
 			}
 		}
 	}
@@ -280,6 +286,7 @@ func (c *checker) checkProgram(files []*parser.File) error {
 	// Pass 1b: collect all fn signatures, resolve struct/enum fields.
 	for _, f := range files {
 		mod := fileModule[f]
+		c.currentModule = mod // needed for module-aware lookups inside buildStructTypeFields etc.
 		for _, d := range f.Decls {
 			switch decl := d.(type) {
 			case *parser.FnDecl:
@@ -287,7 +294,9 @@ func (c *checker) checkProgram(files []*parser.File) error {
 					// Generic function — defer until call-site monomorphization.
 					c.genericFns[decl.Name.Lexeme] = decl
 					if c.symModule != nil {
-						c.symModule[decl.Name.Lexeme] = mod
+						if _, exists := c.symModule[decl.Name.Lexeme]; !exists {
+							c.symModule[decl.Name.Lexeme] = mod
+						}
 					}
 				} else {
 					sig, err := c.buildFnSig(decl)
@@ -296,7 +305,9 @@ func (c *checker) checkProgram(files []*parser.File) error {
 					}
 					c.fnSigs[decl.Name.Lexeme] = sig
 					if c.symModule != nil {
-						c.symModule[decl.Name.Lexeme] = mod
+						if _, exists := c.symModule[decl.Name.Lexeme]; !exists {
+							c.symModule[decl.Name.Lexeme] = mod
+						}
 					}
 					c.fnDecls[decl.Name.Lexeme] = decl
 					if decl.Effects != nil {
@@ -325,10 +336,10 @@ func (c *checker) checkProgram(files []*parser.File) error {
 					return err
 				}
 				c.fnSigs[decl.Name.Lexeme] = &FnType{Params: params, Ret: ret}
-				c.symModule[decl.Name.Lexeme] = mod
-				if decl.Effects != nil {
-					c.fnEffects[decl.Name.Lexeme] = decl.Effects
+				if _, exists := c.symModule[decl.Name.Lexeme]; !exists {
+					c.symModule[decl.Name.Lexeme] = mod
 				}
+				c.fnEffects[decl.Name.Lexeme] = decl.Effects
 				c.externFns[decl.Name.Lexeme] = true
 			case *parser.ConstDecl:
 				if err := c.checkConstDecl(decl); err != nil {
@@ -345,15 +356,31 @@ func (c *checker) checkProgram(files []*parser.File) error {
 	// Use-validation pass: verify each UseDecl references a real module and name.
 	// Build per-file import tables.
 	fileUses := make(map[*parser.File]map[string]string)
+	fileWildcardUses := make(map[*parser.File]map[string]bool)
 	for _, f := range files {
 		uses := make(map[string]string)
+		wildcards := make(map[string]bool)
 		for _, d := range f.Decls {
 			ud, ok := d.(*parser.UseDecl)
 			if !ok {
 				continue
 			}
-			if len(ud.Path) < 2 {
-				return &Error{Tok: ud.UseTok, Msg: "use path must have the form 'module::Name'"}
+			if len(ud.Path) == 1 {
+				// `use module` — wildcard, but only valid if `module` is a known module name.
+				modName := ud.Path[0].Lexeme
+				known := false
+				for _, m := range c.symModule {
+					if m == modName {
+						known = true
+						break
+					}
+				}
+				if !known {
+					return &Error{Tok: ud.UseTok,
+						Msg: fmt.Sprintf("use %q: must have the form 'module::Name'; no module named %q found", modName, modName)}
+				}
+				wildcards[modName] = true
+				continue
 			}
 			// Module is the first segment; imported name is the last segment.
 			modName := ud.Path[0].Lexeme
@@ -376,12 +403,14 @@ func (c *checker) checkProgram(files []*parser.File) error {
 			uses[symName] = modName
 		}
 		fileUses[f] = uses
+		fileWildcardUses[f] = wildcards
 	}
 
 	// Pass 2: type-check function bodies with per-file module context.
 	for _, f := range files {
 		c.currentModule = fileModule[f]
 		c.currentUses = fileUses[f]
+		c.currentWildcardUses = fileWildcardUses[f]
 		c.errs = nil
 		for _, d := range f.Decls {
 			switch decl := d.(type) {
@@ -409,6 +438,16 @@ func (c *checker) checkProgram(files []*parser.File) error {
 	return nil
 }
 
+// qualKey returns the map key and C name for a type in a given module.
+// For root-namespace types (mod == ""), both are just the plain name.
+// For module types, the key is "mod.name" and the C name is "mod_name".
+func qualKey(mod, name string) (key, cName string) {
+	if mod == "" {
+		return name, name
+	}
+	return mod + "." + name, mod + "_" + name
+}
+
 // checkModuleAccess returns an error if name belongs to a different module
 // that has not been imported via `use` in the current file.
 // It is a no-op when symModule is nil (single-file / Check mode).
@@ -427,8 +466,86 @@ func (c *checker) checkModuleAccess(name string, tok lexer.Token) error {
 	if importedFrom, ok := c.currentUses[name]; ok && importedFrom == symMod {
 		return nil
 	}
+	// Cross-module: require an explicit use import or whole-module wildcard.
+	if c.currentWildcardUses != nil && c.currentWildcardUses[symMod] {
+		return nil
+	}
 	return &Error{Tok: tok,
 		Msg: fmt.Sprintf("%q is from module %q; add 'use %s::%s'", name, symMod, symMod, name)}
+}
+
+// lookupStruct finds a struct type by unqualified name using the following
+// priority order:
+//  1. Current module (own declarations always visible)
+//  2. Explicitly imported via `use mod::Name`
+//  3. Wildcard-imported via `use mod`
+//  4. Root namespace (no module prefix)
+//  5. Any other module (cross-module fallback so checkModuleAccess can emit
+//     "is from module X" instead of the less helpful "undefined struct")
+func (c *checker) lookupStruct(name string) (*StructType, bool) {
+	if c.currentModule != "" {
+		if st, ok := c.structs[c.currentModule+"."+name]; ok {
+			return st, true
+		}
+	}
+	if c.currentUses != nil {
+		if importedMod, ok := c.currentUses[name]; ok {
+			if st, ok := c.structs[importedMod+"."+name]; ok {
+				return st, true
+			}
+		}
+	}
+	if c.currentWildcardUses != nil {
+		for modName := range c.currentWildcardUses {
+			if st, ok := c.structs[modName+"."+name]; ok {
+				return st, true
+			}
+		}
+	}
+	if st, ok := c.structs[name]; ok {
+		return st, true
+	}
+	// Cross-module fallback: find in any module so checkModuleAccess can
+	// produce "is from module X" rather than "undefined struct".
+	if symMod, known := c.symModule[name]; known && symMod != "" {
+		if st, ok := c.structs[symMod+"."+name]; ok {
+			return st, true
+		}
+	}
+	return nil, false
+}
+
+// lookupEnum finds an enum type by unqualified name using the same priority
+// order as lookupStruct.
+func (c *checker) lookupEnum(name string) (*EnumType, bool) {
+	if c.currentModule != "" {
+		if et, ok := c.enums[c.currentModule+"."+name]; ok {
+			return et, true
+		}
+	}
+	if c.currentUses != nil {
+		if importedMod, ok := c.currentUses[name]; ok {
+			if et, ok := c.enums[importedMod+"."+name]; ok {
+				return et, true
+			}
+		}
+	}
+	if c.currentWildcardUses != nil {
+		for modName := range c.currentWildcardUses {
+			if et, ok := c.enums[modName+"."+name]; ok {
+				return et, true
+			}
+		}
+	}
+	if et, ok := c.enums[name]; ok {
+		return et, true
+	}
+	if symMod, known := c.symModule[name]; known && symMod != "" {
+		if et, ok := c.enums[symMod+"."+name]; ok {
+			return et, true
+		}
+	}
+	return nil, false
 }
 
 // ── Internal checker state ────────────────────────────────────────────────────
@@ -492,9 +609,10 @@ type checker struct {
 	callSiteGeneric map[parser.Expr]*GenericInstance      // e.Fn → instance for call sites
 
 	// Module enforcement — nil in single-file (Check) mode, populated by CheckProgram.
-	symModule     map[string]string // top-level name → declaring module ("" = root/no module)
-	currentModule string            // module of the file currently being checked
-	currentUses   map[string]string // imported name → source module (for current file)
+	symModule            map[string]string // top-level name → declaring module ("" = root/no module)
+	currentModule        string            // module of the file currently being checked
+	currentUses          map[string]string // imported name → source module (for current file)
+	currentWildcardUses  map[string]bool   // module names imported wholesale via `use module`
 
 	// Capability system
 	capabilities map[string]bool            // names declared with `cap Name`
@@ -955,7 +1073,7 @@ func (c *checker) buildFnSig(d *parser.FnDecl) (*FnType, error) {
 }
 
 func (c *checker) buildStructTypeFields(d *parser.StructDecl) error {
-	st := c.structs[d.Name.Lexeme]
+	st, _ := c.lookupStruct(d.Name.Lexeme)
 	for _, f := range d.Fields {
 		t, err := c.resolveTypeExpr(f.Type)
 		if err != nil {
@@ -967,7 +1085,7 @@ func (c *checker) buildStructTypeFields(d *parser.StructDecl) error {
 }
 
 func (c *checker) buildEnumTypeFields(d *parser.EnumDecl) error {
-	et := c.enums[d.Name.Lexeme]
+	et, _ := c.lookupEnum(d.Name.Lexeme)
 	for i, v := range d.Variants {
 		fields := make([]Type, len(v.Fields))
 		for j, f := range v.Fields {
@@ -987,6 +1105,17 @@ func (c *checker) buildEnumTypeFields(d *parser.EnumDecl) error {
 func (c *checker) resolveTypeExpr(te parser.TypeExpr) (Type, error) {
 	switch t := te.(type) {
 	case *parser.NamedType:
+		// Module-qualified reference: parsed.Expr — look up directly, no access check needed.
+		if t.Module != nil {
+			qualK := t.Module.Lexeme + "." + t.Name.Lexeme
+			if st, ok := c.structs[qualK]; ok {
+				return st, nil
+			}
+			if et, ok := c.enums[qualK]; ok {
+				return et, nil
+			}
+			return nil, c.errorf(t.Name, "unknown type %q.%q", t.Module.Lexeme, t.Name.Lexeme)
+		}
 		name := t.Name.Lexeme
 		// Check active type-variable substitution (during monomorphization).
 		if c.typeVarSubst != nil {
@@ -997,13 +1126,14 @@ func (c *checker) resolveTypeExpr(te parser.TypeExpr) (Type, error) {
 		if builtin, ok := BuiltinTypes[name]; ok {
 			return builtin, nil
 		}
-		if st, ok := c.structs[name]; ok {
+		// Prefer current module's version of the type.
+		if st, ok := c.lookupStruct(name); ok {
 			if err := c.checkModuleAccess(name, t.Name); err != nil {
 				return nil, err
 			}
 			return st, nil
 		}
-		if et, ok := c.enums[name]; ok {
+		if et, ok := c.lookupEnum(name); ok {
 			return et, nil
 		}
 		return nil, c.errorf(t.Name, "unknown type %q", name)
@@ -2246,7 +2376,7 @@ func (c *checker) checkPattern(pattern parser.Expr, matchedType Type, sc *scope)
 		}
 	case *parser.PathExpr:
 		// Unit enum variant pattern: Shape::Point
-		et, ok := c.enums[p.Head.Lexeme]
+		et, ok := c.lookupEnum(p.Head.Lexeme)
 		if !ok {
 			return nil, c.errorf(p.Head, "undefined enum %q in pattern", p.Head.Lexeme)
 		}
@@ -2263,7 +2393,7 @@ func (c *checker) checkPattern(pattern parser.Expr, matchedType Type, sc *scope)
 	case *parser.CallExpr:
 		// Check for enum variant pattern: Shape::Circle(r)
 		if path, ok2 := p.Fn.(*parser.PathExpr); ok2 {
-			et, ok := c.enums[path.Head.Lexeme]
+			et, ok := c.lookupEnum(path.Head.Lexeme)
 			if !ok {
 				return nil, c.errorf(path.Head, "undefined enum %q in pattern", path.Head.Lexeme)
 			}
@@ -3769,7 +3899,7 @@ func (c *checker) inferPathExpr(e *parser.PathExpr, sc *scope) (Type, error) {
 }
 
 func (c *checker) inferStructLitExpr(e *parser.StructLitExpr, sc *scope) (Type, error) {
-	st, ok := c.structs[e.TypeName.Lexeme]
+	st, ok := c.lookupStruct(e.TypeName.Lexeme)
 	if !ok {
 		return nil, c.errorf(e.TypeName, "undefined struct %q", e.TypeName.Lexeme)
 	}
