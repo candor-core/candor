@@ -484,7 +484,7 @@ func (em *llEmitter) emitLambdaTypeDecls() {
 		}
 		envTy := lam.Name + "_env"
 		parts := make([]string, len(lam.Captures))
-		for i, _ := range lam.Captures {
+		for i := range lam.Captures {
 			if i >= len(lam.CaptureTypes) {
 				parts[i] = "ptr"
 				continue

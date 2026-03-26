@@ -32,9 +32,7 @@ func ExtractDocComments(src string) map[string]string {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "///") {
 			text := strings.TrimPrefix(trimmed, "///")
-			if strings.HasPrefix(text, " ") {
-				text = text[1:]
-			}
+			text = strings.TrimPrefix(text, " ")
 			pending = append(pending, text)
 		} else if trimmed == "" {
 			pending = nil

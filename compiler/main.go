@@ -969,7 +969,7 @@ func runCompile(srcPaths []string, outPath string, cfg BuildConfig) error {
 	cmd.Stderr = os.Stderr
 	cmd.Env = ccEnv(cc)
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("C compiler %q failed: %w", cc, err)
+		return fmt.Errorf("c compiler %q failed: %w", cc, err)
 	}
 	fmt.Printf("candorc: wrote %s\n", outPath)
 	return nil

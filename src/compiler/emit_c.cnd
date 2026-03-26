@@ -123,7 +123,7 @@ fn emit_expr(e: Expr) -> result<str, str> {
     match e {
         Expr::Int(s)         => ok_s(s)
         Expr::Float(s)       => ok_s(s)
-        Expr::Str(s)         => ok_s(str_concat("\"", str_concat(s, "\"")))
+        Expr::Str(s)         => ok_s(s)  ## lexeme already includes the surrounding quotes
         Expr::Bool(b)        => ok_s(bool_to_c_lit(b))
         Expr::Unit           => ok_s("/* unit */0")
         Expr::None           => ok_s("{0}")
@@ -706,27 +706,5 @@ fn emit_c(pf: ParsedFile) -> result<str, str> {
     return ok_s(emb_join(buf))
 }
 
-## ── Standalone driver ─────────────────────────────────────────────────────────
-
-fn main() -> unit effects(io) {
-    let mut src: str = ""
-    loop {
-        let line = try_read_line() must {
-            some(s) => s
-            none    => break
-        }
-        src = str_concat(src, str_concat(line, "\n"))
-    }
-
-    let tokens = lex(src)
-    match parse(tokens, "<stdin>") {
-        ok(pf) => {
-            match emit_c(pf) {
-                ok(csrc) => print(csrc)
-                err(e)   => print(str_concat("emit error: ", e))
-            }
-        }
-        err(e) => print(str_concat("parse error: ", e))
-    }
-    return unit
-}
+## ── Standalone driver moved to main.cnd (M9.7) ──────────────────────────────
+## Entry point is now in main.cnd; this file is a library module.

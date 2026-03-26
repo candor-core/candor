@@ -449,14 +449,6 @@ func evalUnaryExpr(c *checker, e *parser.UnaryExpr, env map[string]interface{}) 
 	return nil, false
 }
 
-func copyEnv(env map[string]interface{}) map[string]interface{} {
-	out := make(map[string]interface{}, len(env))
-	for k, v := range env {
-		out[k] = v
-	}
-	return out
-}
-
 // unquoteString strips outer quotes from a Candor string literal.
 func unquoteString(s string) string {
 	if len(s) >= 2 && s[0] == '"' && s[len(s)-1] == '"' {

@@ -82,7 +82,7 @@ func Load(path string) (*Manifest, error) {
 		// Key = "value" or key = ["a", "b"]
 		eqIdx := strings.IndexByte(line, '=')
 		if eqIdx < 0 {
-			return nil, fmt.Errorf("Candor.toml:%d: expected key = value", lineNum)
+			return nil, fmt.Errorf("line %d: expected key = value", lineNum)
 		}
 		key := strings.TrimSpace(line[:eqIdx])
 		val := strings.TrimSpace(line[eqIdx+1:])
@@ -117,7 +117,7 @@ func Load(path string) (*Manifest, error) {
 		return nil, err
 	}
 	if m.Name == "" {
-		return nil, fmt.Errorf("Candor.toml: [package] name is required")
+		return nil, fmt.Errorf("[package] name is required in Candor.toml")
 	}
 	return m, nil
 }

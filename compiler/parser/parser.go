@@ -670,16 +670,6 @@ func (p *parser) parseLetStmt() (Stmt, error) {
 	}, nil
 }
 
-func (p *parser) parseAssignStmt() (*AssignStmt, error) {
-	name := p.advance() // ident
-	eq := p.advance()   // =
-	value, err := p.parseExpr()
-	if err != nil {
-		return nil, err
-	}
-	return &AssignStmt{Name: name, Eq: eq, Value: value}, nil
-}
-
 // compoundOpFor maps a compound-assignment token to its binary arithmetic token.
 func compoundOpFor(t lexer.TokenType) (lexer.TokenType, bool) {
 	switch t {
@@ -833,14 +823,6 @@ func (p *parser) parseForStmt() (*ForStmt, error) {
 		return nil, err
 	}
 	return &ForStmt{ForTok: forTok, Var: varTok, Var2: var2, InTok: inTok, Collection: coll, Body: body}, nil
-}
-
-func (p *parser) parseExprStmt() (Stmt, error) {
-	expr, err := p.parseExpr()
-	if err != nil {
-		return nil, err
-	}
-	return &ExprStmt{X: expr}, nil
 }
 
 // ── Expressions ──────────────────────────────────────────────────────────────

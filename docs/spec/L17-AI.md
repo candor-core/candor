@@ -1,0 +1,19 @@
+# LAYER 17: AI
+**Status:** DRAFT
+**Depends on:** L7-EFFECTS.md, L9-MODULES.md
+
+---
+
+## STATUS
+
+This layer document is a **stub**. Rules are indexed in INDEX.md
+but have not yet been formally written. This document must be populated
+before this layer reaches STABLE status.
+
+Use the Index to find which rule IDs belong to this layer.
+When you need a rule from this layer, populate it here using the
+rule template from FRAMEWORK.md, then file AMEND-NNN.
+
+---
+
+*Stub — populate per FRAMEWORK.md rule template*

@@ -570,6 +570,7 @@ type checker struct {
 	comptimeVals  map[parser.Expr]interface{}           // comptime-evaluated call results
 	comptimeErrs  []error                               // compile-time contract violations
 	curEffects   *parser.EffectsAnnotation             // effects of fn currently being checked
+	curRetType   Type                                  // return type of fn currently being checked
 	errs         []error                               // collected statement-level errors
 	warnings     []Warning                             // collected non-fatal diagnostics
 	letUsages    []*varUsage                           // let bindings in current function (reset per fn)
@@ -1200,9 +1201,11 @@ func (c *checker) checkFnDecl(d *parser.FnDecl) error {
 	for i, p := range d.Params {
 		sc.define(p.Name.Lexeme, sig.Params[i])
 	}
-	// Set the current function's effects for callee-checking within the body.
+	// Set the current function's effects and return type for body checking.
 	prev := c.curEffects
+	prevRet := c.curRetType
 	c.curEffects = c.fnEffects[d.Name.Lexeme] // nil if unannotated
+	c.curRetType = sig.Ret
 
 	// Type-check contract clauses.
 	retType := sig.Ret
@@ -1227,6 +1230,7 @@ func (c *checker) checkFnDecl(d *parser.FnDecl) error {
 	err := c.checkBlock(d.Body, sc, sig.Ret)
 	c.flushUnusedWarnings()
 	c.curEffects = prev
+	c.curRetType = prevRet
 	return err
 }
 
@@ -1705,7 +1709,7 @@ func (c *checker) inferExpr(expr parser.Expr, sc *scope, hint Type) (Type, error
 		stmts := e.Stmts
 		// Check all but the last statement first (no hint propagation needed).
 		for _, stmt := range stmts[:max(0, len(stmts)-1)] {
-			if err := c.checkStmt(stmt, inner, hint); err != nil {
+			if err := c.checkStmt(stmt, inner, c.curRetType); err != nil {
 				return nil, err
 			}
 		}
@@ -1720,8 +1724,13 @@ func (c *checker) inferExpr(expr parser.Expr, sc *scope, hint Type) (Type, error
 				}
 				blockType = t
 			} else {
-				if err := c.checkStmt(last, inner, hint); err != nil {
+				if err := c.checkStmt(last, inner, c.curRetType); err != nil {
 					return nil, err
+				}
+				// Return/break as last stmt — this arm is never (control never reaches after it).
+				switch last.(type) {
+				case *parser.ReturnStmt, *parser.BreakStmt:
+					blockType = TNever
 				}
 			}
 		}
