@@ -1,13 +1,20 @@
-## main.cnd — candorc-stage1 entry point  (M9.7)
+## main.cnd — candorc-stage1 entry point  (M9.9)
 ##
 ## Usage:  candorc-stage1 <source.cnd>
-##   Reads a Candor source file, runs lex→parse→emit_c,
+##   Reads a Candor source file, runs lex→parse→typecheck→emit_c,
 ##   and writes the resulting C source to stdout.
 ##   Pipe through gcc to get a native binary.
-##
-## Note: typeck.cnd defines its own AST types (in the typeck module) that
-## differ from parser.cnd's root-namespace types; type-checking is skipped
-## in stage1 — emit_c does not require type annotations.
+
+fn print_str_list(prefix: str, items: vec<str>) -> unit effects(io) {
+    let n = vec_len(items) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        print_err(str_concat(prefix, items[i as u64]))
+        i = i + 1
+    }
+    return unit
+}
 
 fn main() -> unit effects(io, sys) {
     let args = os_args()
@@ -39,6 +46,14 @@ fn main() -> unit effects(io, sys) {
             print_err(str_concat("candorc-stage1: parse error: ", e))
             return unit
         }
+    }
+
+    ## Type-check
+    let tf = typecheck(refmut(pf))
+    print_str_list("candorc-stage1: warning: ", tf.warnings)
+    if vec_len(tf.errors) as i64 > 0 {
+        print_str_list("candorc-stage1: type error: ", tf.errors)
+        return unit
     }
 
     ## Emit C

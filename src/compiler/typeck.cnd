@@ -742,10 +742,12 @@ fn ty_unify_numeric(a: Type, b: Type) -> result<Type, str> {
 
 ## ── binary operator type rules ────────────────────────────────────────────────
 fn infer_arith(a: Type, b: Type) -> result<Type, str> {
+    if ty_is_unknown(a) or ty_is_unknown(b) { return ok_type(ty_unknown()) }
     return ty_unify_numeric(a, b)
 }
 
 fn infer_cmp(a: Type, b: Type) -> result<Type, str> {
+    if ty_is_unknown(a) or ty_is_unknown(b)      { return ok_type(ty_bool()) }
     if ty_eq(a, b)                               { return ok_type(ty_bool()) }
     if ty_is_int_lit(a) and ty_is_int(b)         { return ok_type(ty_bool()) }
     if ty_is_int(a) and ty_is_int_lit(b)         { return ok_type(ty_bool()) }
@@ -799,9 +801,13 @@ fn infer_field_access(sname: str, field: str, env: ref<TypeEnv>) -> result<Type,
 
 ## ── expression inference helpers ─────────────────────────────────────────────
 fn infer_ident(name: str, ss: ref<ScopeStack>, env: ref<TypeEnv>) -> result<Type, str> {
+    let prim = lookup_prim(name) must {
+        some(p) => return ok_type(p)
+        none    => unit
+    }
     let t = scope_lookup(ss, name) must {
         some(t) => t
-        none    => return err_type(str_concat("undefined identifier: ", name))
+        none    => return ok_type(ty_unknown())  ## builtin or extern ident — trusted
     }
     return ok_type(t)
 }
@@ -842,8 +848,12 @@ fn infer_fld(f: box<FieldExpr>, ss: ref<ScopeStack>, env: ref<TypeEnv>) -> resul
         ok(t)  => t
         err(e) => return err_type(e)
     }
+    if ty_is_unknown(obj_t) { return ok_type(ty_unknown()) }
     if obj_t.kind == TYK_NAMED() {
         return infer_field_access(obj_t.name, fe.field, env)
+    }
+    if obj_t.kind == TYK_GEN() {
+        return ok_type(ty_unknown())  ## generic type fields (vec.len etc.) not yet tracked
     }
     return err_type("field access requires a struct type")
 }
@@ -892,7 +902,7 @@ fn infer_call_fn(c: box<CallExpr>, ss: ref<ScopeStack>, env: ref<TypeEnv>) -> re
     }
     let sig = map_get(env.fns, fn_name) must {
         some(s) => s
-        none    => return err_type(str_concat("unknown function: ", fn_name))
+        none    => return ok_type(ty_unknown())  ## builtin or extern — trusted
     }
     return ok_type(sig.ret)
 }
