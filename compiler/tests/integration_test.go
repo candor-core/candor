@@ -2165,7 +2165,39 @@ func TestM9ParserSource(t *testing.T) {
 }
 
 func TestM9TypeckSource(t *testing.T) {
-	checkSource(t, filepath.Join("..", "..", "src", "compiler", "typeck.cnd"))
+	// typeck.cnd is a bundle file — it references TypeExpr and other types
+	// declared in parser.cnd.  Check both together.
+	checkBundledSource(t,
+		filepath.Join("..", "..", "src", "compiler", "parser.cnd"),
+		filepath.Join("..", "..", "src", "compiler", "typeck.cnd"),
+	)
+}
+
+// checkBundledSource parses deps+target together and type-checks them as a
+// program so that cross-file type references (e.g. TypeExpr from parser.cnd
+// used in typeck.cnd) resolve correctly.
+func checkBundledSource(t *testing.T, paths ...string) {
+	t.Helper()
+	var files []*parser.File
+	for _, path := range paths {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		tokens, err := lexer.Tokenize(path, string(src))
+		if err != nil {
+			t.Fatalf("lex %s: %v", path, err)
+		}
+		file, err := parser.Parse(path, tokens)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		files = append(files, file)
+	}
+	_, err := typeck.CheckProgram(files)
+	if err != nil {
+		t.Fatalf("typeck bundle %v: %v", paths, err)
+	}
 }
 
 func TestM55WasmStdSource(t *testing.T) {
@@ -2246,7 +2278,73 @@ func TestM9ParserEmitC(t *testing.T) {
 }
 
 func TestM9TypeckEmitC(t *testing.T) {
-	emitSource(t, filepath.Join("..", "..", "src", "compiler", "typeck.cnd"))
+	// typeck.cnd depends on types from parser.cnd — emit and compile as a merged bundle.
+	srcDir := filepath.Join("..", "..", "src", "compiler")
+	emitBundle(t,
+		filepath.Join(srcDir, "parser.cnd"),
+		filepath.Join(srcDir, "typeck.cnd"),
+	)
+}
+
+// emitBundledSource is like emitSource but type-checks and emits C for all
+// paths as a bundle, then compiles the concatenated C output.  Used for bundle
+// files that reference types declared in sibling source files.
+func emitBundledSource(t *testing.T, paths ...string) {
+	t.Helper()
+	skipIfNoCC(t)
+
+	var files []*parser.File
+	for _, path := range paths {
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		tokens, err := lexer.Tokenize(path, string(src))
+		if err != nil {
+			t.Fatalf("lex %s: %v", path, err)
+		}
+		file, err := parser.Parse(path, tokens)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		files = append(files, file)
+	}
+
+	res, err := typeck.CheckProgram(files)
+	if err != nil {
+		t.Fatalf("typeck bundle %v: %v", paths, err)
+	}
+
+	// Emit C for every file and concatenate — this mirrors candorc build behaviour
+	// and ensures cross-file type references resolve at the C level.
+	var combined strings.Builder
+	for i, f := range files {
+		cSrc, err := emit_c.Emit(f, res)
+		if err != nil {
+			t.Fatalf("emit_c %s: %v", paths[i], err)
+		}
+		combined.WriteString(cSrc)
+		combined.WriteByte('\n')
+	}
+	bundleC := combined.String()
+	if len(bundleC) == 0 {
+		t.Fatalf("emit_c bundle: produced empty output")
+	}
+
+	dir := t.TempDir()
+	cPath := filepath.Join(dir, "bundle.c")
+	if err := os.WriteFile(cPath, []byte(bundleC), 0o644); err != nil {
+		t.Fatalf("write C: %v", err)
+	}
+
+	cc := findCC()
+	objPath := filepath.Join(dir, "bundle.o")
+	ccCmd := exec.Command(cc, "-c", "-o", objPath, cPath)
+	ccCmd.Env = ccEnv(cc)
+	out, err := ccCmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("gcc failed on bundle %v:\n%s", paths, out)
+	}
 }
 
 // bundleFileModuleName returns the module name declared in a file, or "" for root namespace.
