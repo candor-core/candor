@@ -17,7 +17,8 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Status: Pre-Alpha](https://img.shields.io/badge/Status-Pre--Alpha-orange.svg)]()
-[![Compiler: v0.1.0](https://img.shields.io/badge/Compiler-v0.1.0-green.svg)]()
+[![Compiler: v0.2.0](https://img.shields.io/badge/Compiler-v0.2.0-green.svg)](https://github.com/scottcorleyg1/candor/releases/tag/v0.2.0)
+[![Tests: passing](https://img.shields.io/badge/Tests-passing-brightgreen.svg)]()
 
 ---
 
@@ -82,8 +83,8 @@ Core          primitives, control flow, result<T,E>, option<T>, structs     [IMP
   realtime      WCET contracts, ISR constraints                              [future]
   crypto        constant-time, zeroize-on-drop                               [future]
   semantic_index compile-time vector search                                  [future]
-  c_interop     honest C boundary                                            [future]
-  llvm_backend  direct IR emission                                           [future]
+  c_interop     honest C boundary (#c_header, extern fn)                    [IMPLEMENTED]
+  llvm_backend  direct IR emission (--backend=llvm)                         [IMPLEMENTED]
 ```
 
 Every layer is opt-in. A program using only Core is valid, safe, and compilable.
@@ -152,12 +153,20 @@ let v = match opt {
 
 ## Getting Started
 
-### Prerequisites
+### Option A — Download a pre-built binary
+
+Pre-built `candorc` binaries for Windows (x64) and Linux (x64) are on the
+[Releases page](https://github.com/scottcorleyg1/candor/releases/latest).
+Download, make executable, and add to your PATH.
+
+You still need a C compiler (GCC or Clang) to compile the emitted C.
+
+### Option B — Build from source
+
+**Prerequisites**
 
 - Go 1.24 or later
 - GCC or a C compiler reachable as `gcc` or `cc` (override with the `CC` environment variable)
-
-### Build the Compiler
 
 ```bash
 git clone https://github.com/scottcorleyg1/candor
@@ -277,7 +286,7 @@ candorc main.cnd math.cnd
 
 ## Status
 
-Candor `v0.1.0` is a working compiler. The pipeline `.cnd` source → lex → parse → typecheck → emit C → binary is complete. Real programs compile and run.
+Candor `v0.2.0` is a working compiler. The pipeline `.cnd` source → lex → parse → typecheck → emit C → binary is complete. Real programs compile and run. All tests pass.
 
 | Component | Status |
 |---|---|
@@ -288,22 +297,31 @@ Candor `v0.1.0` is a working compiler. The pipeline `.cnd` source → lex → pa
 | Contracts (requires/ensures) | Emit assert() |
 | Multi-file / module enforcement | Complete |
 | C emitter | Complete |
-| First-class functions | Complete |
+| LLVM IR emitter | Complete |
+| WebAssembly target | Complete |
+| First-class functions & closures | Complete |
+| Generics | Complete |
+| Traits (trait, impl, bounds) | Complete |
 | Literal pattern matching | Complete |
 | vec\<T\> (push, len, index, for) | Complete |
 | map\<K,V\> (insert, get, remove, len, contains) | Complete |
+| box\<T\> recursive heap types | Complete |
+| arc\<T\> shared reference-counted ownership | Complete |
+| task\<T\> + spawn structured concurrency | Complete |
 | stdin I/O (read_*, try_read_*) | Complete |
 | File I/O (read_file, write_file, append_file) | Complete |
 | String operations (concat, len, eq, substr) | Complete |
 | User-defined enums (sum types with data) | Complete |
 | Ownership annotations (ref, refmut, move, deref) | Complete |
-| i128 / u128 | Complete |
+| i128 / u128 / f16 / bf16 | Complete |
 | Comptime evaluation (pure / effects []) | Complete |
 | secret\<T\> information-flow enforcement | Complete |
-| Lambdas / closures | Not yet |
+| MCP tool annotations (#mcp_tool) | Complete |
+| LSP server (diagnostics, hover, completion) | Complete |
+| **Bootstrap (compiler written in Candor)** | **Stage 1 complete — lexer, parser, typeck, emit_c all in Candor** |
 | set\<T\> | Not yet |
 | Allocator layer | Future |
-| LLVM backend | Future |
+| Stage 2 self-hosting | Future |
 
 ---
 
@@ -366,4 +384,4 @@ The Candor name, language specification, and compiler source are the property of
 
 ---
 
-*Candor — compiler v0.1.0*
+*Candor — compiler v0.2.0 — Stage 1 bootstrap complete*

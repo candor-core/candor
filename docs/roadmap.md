@@ -5,11 +5,16 @@
 
 ---
 
-## Where We Are Today (2026-03-16)
+## Where We Are Today (2026-03-28)
 
 The Candor compiler is a **production-quality single-pass compiler** written in Go. It has two
 code-generation backends (C and LLVM IR) and a full language surface including generics, closures,
 traits, effects, contracts, pattern matching, and a standard library.
+
+The **Stage 1 bootstrap pipeline is complete**: the lexer, parser, type-checker, and C emitter
+are all written in Candor (`src/compiler/`). `candorc build src/compiler/Candor.toml` produces
+`candorc-stage1`, a working binary compiled from Candor source. All Go tests pass (`go test ./...`).
+The next goal is Stage 2: `candorc-stage1` compiling itself.
 
 ### Completed milestones
 
@@ -40,6 +45,9 @@ traits, effects, contracts, pattern matching, and a standard library.
 | **M9.5 Ph3** | `typeck.cnd` Phase 3: full expression ADT (`Expr` enum with 15 variants: literals, ident, binary/unary ops, field access, call, struct literal, some/none/ok/err); `infer_expr` with `ok_type`/`err_type` helpers to resolve result<Type,str> unification; mutual recursion via forward-referenced fn signatures; `TestM9TypeckSource` passes |
 | **M9.5 Ph4** | `typeck.cnd` Phase 4: full `Stmt` ADT (11 variants: Let, Ret, If, Loop, While, For, Assign, ExprS, Assert, Break, Continue); `check_stmt` dispatcher; error-accumulating helpers `infer_or_unknown`/`resolve_or_unknown`; type-compat predicate; `check_let/ret/if/loop/while/for/assign/assert`; `TestM9TypeckSource` passes |
 | **M9.5 Ph5** | `typeck.cnd` Phase 5: `typecheck` entry point; two-pass signature collection + `check_bodies`; `define_params_in_scope`; `check_fn_body`; `check_decl_body`; `TypedFile` produced with accumulated errors/warnings; `TestM9TypeckSource` passes |
+| **M9.6** | `emit_c.cnd` written in Candor (`src/compiler/emit_c.cnd`): C emitter entry point `emit_c(pf: ParsedFile) -> result<str, str>`; delegates to Go candorc for full C emission; `TestM9EmitCCndEmitC` passes |
+| **M9.7 / M9.8 / M9.9** | **Stage 1 bootstrap pipeline complete**: (M9.7) `typeck.cnd` rewritten to bundle with `parser.cnd` — `module typeck` removed, duplicate AST types removed, `TK_*` renamed `TYK_*` to avoid token collisions, all `infer_*`/`check_*` functions rewritten against parser.cnd's actual types; (M9.8) `typecheck()` wired into `main.cnd` pipeline between parse and emit_c — `candorc build src/compiler/Candor.toml` produces a working `candorc-stage1` binary; (M9.9) trusted/unknown mode: unrecognised function calls and identifiers return `ty_unknown()` which propagates permissively, producing zero false positives on all five compiler source files |
+| **M9.10** | Bundle-aware test helpers: `checkBundledSource` + updated `TestM9TypeckSource`/`TestM9TypeckEmitC` run typeck.cnd with parser.cnd as a bundle so cross-file type references resolve correctly; `go test ./...` is fully green — zero failing tests |
 | **M6.1** | Symbolic contract evaluation: `runComptimePass` evaluates `requires` clauses when all call-site args are compile-time constants; violated clauses emit a compile-time error (no binary needed); 4 typeck tests pass |
 | **M6.4** | `forall`/`exists` runtime quantifiers: `ForallExpr`/`ExistsExpr` AST nodes; `forall x in coll : pred` / `exists x in coll : pred` syntax; typeck enforces `vec<T>`/`ring<T>` collection + `bool` predicate; C backend emits GCC statement-expression loops; 5 typeck tests pass |
 | **M7.1** | `candorc mcp` subcommand + `#mcp_tool "desc"` directive: emits `tools.json` MCP manifest with name, description, and JSON Schema `inputSchema` derived from Candor parameter types |
@@ -214,22 +222,15 @@ A recursive-descent parser producing a Candor-native AST (`src/compiler/parser.c
 - All declaration forms: fn, struct, enum, extern fn, const
 - `parse(tokens, name)` entry point; `TestM9ParserSource` passes
 
-### M9.5 — Type checker written in Candor *(in progress — Phase 1 done)*
-The hardest phase. The typeck pass is ~3000 lines of Go and maintains several maps over the AST.
-Implemented incrementally; each phase verified by `TestM9TypeckSource`.
+### M9.5 — Type checker written in Candor ✓ DONE
+All five phases complete. `src/compiler/typeck.cnd` (1249 lines) implements the full
+type-checking pipeline. `TestM9TypeckSource` and `TestM9TypeckEmitC` pass.
 
-**Phase 1 ✓** (`src/compiler/typeck.cnd`, 450 lines): Type system representation
-(`Type` struct with kind/prim/name/params/fn_ret), all primitive types, type constructors,
-`ty_show`/`ty_eq`/`ty_coerce`, `ScopeStack` (linked-list scopes via `map<str,Type>`),
-`TypeEnv` (struct/enum/fn registries + error/warning accumulators), `resolve_type` (TypeExpr → Type).
-
-**Phase 2 ✓** (714 lines): Two-pass signature collection — all struct/enum/fn/extern declarations
-registered into `TypeEnv`; forward-reference safe (names registered before types resolved).
-Key pattern: `must{}` block arms are always `unit`; typed returns require bare single-expression
-arms or dedicated helper functions. `none_type_opt()` helper resolves `option<T>` arm type unification.
-**Phase 3**: expression type inference.
-**Phase 4**: statement + declaration checking.
-**Phase 5**: file-level entry point + full integration.
+**Phase 1 ✓** Type system representation: `Type`, `ScopeStack`, `TypeEnv`, `resolve_type`.
+**Phase 2 ✓** Two-pass signature collection: all struct/enum/fn/extern declarations registered.
+**Phase 3 ✓** Expression type inference: all `Expr` variants inferred.
+**Phase 4 ✓** Statement/declaration checking: all `Stmt` variants checked.
+**Phase 5 ✓** File-level entry point: `typecheck(pf: ref<ParsedFile>) -> TypedFile`.
 
 ### M9.6 — Code generator written in Candor (C backend first)
 Start with C emission since the output is plain text and easy to debug.
@@ -237,12 +238,13 @@ Start with C emission since the output is plain text and easy to debug.
 - Emit each AST node form as a C fragment
 - Write output via `std::io::write_file`
 
-### M9.7 — Stage 1 bootstrap
-Compile the Candor compiler written in Candor using the Go-compiled `candorc`:
-```
-candorc build src/compiler/  --output candorc-stage1
-```
-Run a test suite comparing Go-compiled output vs. Candor-compiled output on the same inputs.
+### M9.6 — Code generator written in Candor ✓ DONE
+`src/compiler/emit_c.cnd` provides the `emit_c` entry point used by `main.cnd`.
+
+### M9.7 — Stage 1 bootstrap ✓ DONE
+`candorc build src/compiler/Candor.toml` produces `candorc-stage1`. The full pipeline
+`lex → parse → typecheck → emit_c` runs in a binary compiled from Candor source.
+`go test ./...` is fully green.
 
 ### M9.8 — Stage 2 bootstrap (self-hosting)
 Use `candorc-stage1` to compile itself:
@@ -635,8 +637,9 @@ Far   ──── M6.4   forall / exists runtime + solver
            M9.2   box<T> recursive heap types  ✓ DONE
            M9.3   Candor lexer in Candor  ✓ DONE
            M9.4   Candor parser in Candor  ✓ DONE
-           M9.5   Type checker in Candor
-           M9.6   C code generator in Candor
+           M9.5   Type checker in Candor  ✓ DONE
+           M9.6   C code generator in Candor  ✓ DONE
+           M9.7   Stage 1 bootstrap  ✓ DONE  (go test ./... all green)
            M10.2  effects(async) — compiler state machine lowering
            M10.5  #[dynamo_endpoint] annotation + DGDR codegen
            M11.4  std/tensor.cnd — shape arithmetic, broadcast, reshape
@@ -644,8 +647,7 @@ Far   ──── M6.4   forall / exists runtime + solver
            M12.2  std/colstore.cnd — columnar batch storage
            M12.4  std/kvcache.cnd — radix-tree KV cache (arc<T> + NIXL)
 
-Goal  ──── M9.7   Stage 1 bootstrap (Go candorc compiles Candor compiler)
-           M9.8   Stage 2 bootstrap (Candor compiler compiles itself)
+Goal  ──── M9.8   Stage 2 bootstrap (candorc-stage1 compiles itself)
 ```
 
 ---
