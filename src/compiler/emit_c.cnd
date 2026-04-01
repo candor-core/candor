@@ -128,7 +128,8 @@ fn emit_expr(e: Expr) -> result<str, str> {
         Expr::Unit           => ok_s("/* unit */0")
         Expr::None           => ok_s("{0}")
         Expr::Ident(s)       => ok_s(c_ident(s))
-        Expr::Path(a, b)     => ok_s(str_concat(c_ident(a), str_concat("__", c_ident(b))))
+        Expr::Path(a, b)         => ok_s(str_concat(c_ident(a), str_concat("__", c_ident(b))))
+        Expr::PathBind(a, b, _c) => ok_s(str_concat(c_ident(a), str_concat("__", c_ident(b))))
         Expr::Binary(b)      => emit_binary(b)
         Expr::Unary(u)       => emit_unary(u)
         Expr::Cast(c)        => emit_cast(c)
@@ -141,8 +142,8 @@ fn emit_expr(e: Expr) -> result<str, str> {
         Expr::AddrOf(e)      => emit_addr_of(e)
         Expr::Lambda(l)      => ok_s("/* lambda */NULL")
         Expr::Block(b)       => emit_block_expr(b)
-        Expr::Match(m)       => ok_s("/* match */0")
-        Expr::Must(m)        => ok_s("/* must */0")
+        Expr::Match(m)       => emit_match_expr(m)
+        Expr::Must(m)        => emit_must_expr(m)
         Expr::Return(e)      => emit_return_expr(e)
         Expr::Break          => ok_s("/* break */")
         Expr::Continue       => ok_s("/* continue */")
@@ -292,10 +293,301 @@ fn emit_addr_of(e: box<Expr>) -> result<str, str> {
 
 fn emit_block_expr(b: box<BlkExpr>) -> result<str, str> {
     let be = box_deref(b)
-    match be.final_expr {
-        some(fe) => emit_expr(box_deref(fe))
-        none     => ok_s("/* block */0")
+    let n = vec_len(be.stmts) as i64
+    if n == 0 {
+        match be.final_expr {
+            some(fe) => return emit_expr(box_deref(fe))
+            none     => return ok_s("/* block */0")
+        }
     }
+    ## Has stmts: emit as GCC statement expression
+    let mut buf = emb_new()
+    emb_push(refmut(buf), "(__extension__ ({\n")
+    emit_stmts(be.stmts, refmut(buf), 2) must {
+        ok(v) => v   err(e) => return err(e)
+    }
+    match be.final_expr {
+        some(fe) => {
+            let fe_s = emit_expr(box_deref(fe)) must {
+                ok(v) => v   err(e) => return err(e)
+            }
+            emb_line(refmut(buf), str_concat("        ", str_concat(fe_s, ";")))
+        }
+        none => unit
+    }
+    emb_push(refmut(buf), "    }))")
+    return ok_s(emb_join(buf))
+}
+
+## ── Match / Must expression emission ─────────────────────────────────────────
+
+## Is this arm body a terminal (always returns, never yields a value)?
+fn arm_is_terminal(body: Expr) -> bool {
+    match body {
+        Expr::Return(_) => true
+        Expr::Block(b)  => arm_is_terminal_blk(b)
+        _ => false
+    }
+}
+
+fn arm_is_terminal_blk(b: box<BlkExpr>) -> bool {
+    let blk = box_deref(b)
+    match blk.final_expr {
+        none    => true
+        some(_) => false
+    }
+}
+
+## C condition expression for a pattern
+fn arm_cond(pat: Expr) -> str {
+    match pat {
+        Expr::OkExpr(_)    => "_m._ok"
+        Expr::ErrExpr(_)   => "!_m._ok"
+        Expr::SomeExpr(_)  => "_m != NULL"
+        Expr::None         => "_m == NULL"
+        Expr::Bool(b)      => bool_to_c_cond(b)
+        Expr::Path(en, vn) => str_concat("_m._tag == _TAG_", str_concat(en, str_concat("_", vn)))
+        Expr::Call(c)      => arm_cond_call(c)
+        Expr::Ident(name)  => "1 /*bind*/"
+        _ => "1 /*default*/"
+    }
+}
+
+fn bool_to_c_cond(b: bool) -> str {
+    if b { return "_m" }
+    return "!_m"
+}
+
+fn arm_cond_call(c: box<CallExpr>) -> str {
+    let ce = box_deref(c)
+    match ce.callee {
+        Expr::Path(en, vn) => str_concat("_m._tag == _TAG_", str_concat(en, str_concat("_", vn)))
+        _ => "1 /*call*/"
+    }
+}
+
+## C binding declaration(s) for a pattern, empty string if none
+fn arm_bindings(pat: Expr) -> str {
+    match pat {
+        Expr::OkExpr(inner)   => str_concat("__auto_type ", str_concat(binding_name_of(box_deref(inner)), " = _m._ok_val;"))
+        Expr::ErrExpr(inner)  => str_concat("__auto_type ", str_concat(binding_name_of(box_deref(inner)), " = _m._err_val;"))
+        Expr::SomeExpr(inner) => str_concat("__auto_type ", str_concat(binding_name_of(box_deref(inner)), " = *_m;"))
+        Expr::None            => ""
+        Expr::Bool(_)         => ""
+        Expr::Path(_, _)      => ""
+        Expr::Call(c)         => arm_bindings_call(c)
+        Expr::Ident(name)     => arm_bindings_ident(name)
+        _ => ""
+    }
+}
+
+fn arm_bindings_call(c: box<CallExpr>) -> str {
+    let ce = box_deref(c)
+    match ce.callee {
+        Expr::Path(en, vn) => arm_bindings_enum(vn, ce.args)
+        _ => ""
+    }
+}
+
+fn arm_bindings_enum(vn: str, args: vec<Expr>) -> str {
+    let nargs = vec_len(args) as i64
+    if nargs == 1 {
+        let nm = binding_name_of(args[0 as u64])
+        return str_concat("__auto_type ", str_concat(nm, str_concat(" = _m._v._v", str_concat(vn, ";"))))
+    }
+    return ""
+}
+
+fn arm_bindings_ident(name: str) -> str {
+    if str_eq(name, "_") { return "" }
+    return str_concat("__auto_type ", str_concat(c_ident(name), " = _m;"))
+}
+
+fn binding_name_of(e: Expr) -> str {
+    match e {
+        Expr::Ident(s) => c_ident(s)
+        _ => "_anon"
+    }
+}
+
+## Emit terminal arm body (return / block-with-return) to string
+fn emit_terminal_body_str(body: Expr) -> result<str, str> {
+    match body {
+        Expr::Return(re) => {
+            let inner = emit_expr(box_deref(re)) must {
+                ok(v) => v   err(e) => return err(e)
+            }
+            return ok_s(str_concat("return ", str_concat(inner, ";")))
+        }
+        Expr::Block(b) => {
+            let blk = box_deref(b)
+            let mut buf = emb_new()
+            emit_stmts(blk.stmts, refmut(buf), 3) must {
+                ok(v) => v   err(e) => return err(e)
+            }
+            return ok_s(emb_join(buf))
+        }
+        _ => {
+            let s = emit_expr(body) must { ok(v) => v   err(e) => return err(e) }
+            return ok_s(str_concat(s, ";"))
+        }
+    }
+}
+
+## Emit one arm as a ternary entry: `cond ? (__extension__({bind; body;})) `
+fn emit_one_ternary_arm(pat: Expr, body: Expr) -> result<str, str> {
+    let cond = arm_cond(pat)
+    let bind = arm_bindings(pat)
+    let body_s = emit_expr(body) must { ok(v) => v   err(e) => return err(e) }
+    ## wrap in nested statement expression if binding required
+    if str_len(bind) > 0 {
+        return ok_s(str_concat(cond, str_concat(" ? (__extension__ ({ ", str_concat(bind, str_concat(" ", str_concat(body_s, "; }))"))))))
+    }
+    return ok_s(str_concat(cond, str_concat(" ? ", body_s)))
+}
+
+## ── emit_must_expr ──────────────────────────────────────────────────────────
+fn emit_must_expr(me: box<MustExpr>) -> result<str, str> {
+    let m = box_deref(me)
+    let subj = emit_expr(m.subject) must { ok(v) => v   err(e) => return err(e) }
+    let narms = vec_len(m.arms) as i64
+    let ind1 = "    "
+    let ind2 = "        "
+
+    ## Check if any arm is terminal
+    let mut any_terminal: bool = false
+    let mut i: i64 = 0
+    loop {
+        if i >= narms { break }
+        if arm_is_terminal(m.arms[i as u64].body) { any_terminal = true }
+        i = i + 1
+    }
+
+    let mut out: str = str_concat("(__extension__ ({\n", str_concat(ind1, str_concat("__auto_type _m = ", str_concat(subj, ";\n"))))
+
+    if any_terminal {
+        ## Early-exit style: terminal arms first, then value arm(s) as final expr
+        i = 0
+        loop {
+            if i >= narms { break }
+            let arm = m.arms[i as u64]
+            if arm_is_terminal(arm.body) {
+                let cond = arm_cond(arm.pattern)
+                let bind = arm_bindings(arm.pattern)
+                let tbody = emit_terminal_body_str(arm.body) must { ok(v) => v   err(e) => return err(e) }
+                out = str_concat(out, str_concat(ind1, str_concat("if (", str_concat(cond, ") {\n"))))
+                if str_len(bind) > 0 {
+                    out = str_concat(out, str_concat(ind2, str_concat(bind, "\n")))
+                }
+                out = str_concat(out, str_concat(tbody, "\n"))
+                out = str_concat(out, str_concat(ind1, "}\n"))
+            }
+            i = i + 1
+        }
+        ## Value arm(s) as final expression(s)
+        i = 0
+        loop {
+            if i >= narms { break }
+            let arm = m.arms[i as u64]
+            if not arm_is_terminal(arm.body) {
+                let bind = arm_bindings(arm.pattern)
+                if str_len(bind) > 0 {
+                    out = str_concat(out, str_concat(ind1, str_concat(bind, "\n")))
+                }
+                let vbody = emit_expr(arm.body) must { ok(v) => v   err(e) => return err(e) }
+                out = str_concat(out, str_concat(ind1, str_concat(vbody, ";\n")))
+            }
+            i = i + 1
+        }
+    } else {
+        ## Ternary chain for all-value arms
+        out = str_concat(out, str_concat(ind1, "("))
+        i = 0
+        loop {
+            if i >= narms { break }
+            let arm = m.arms[i as u64]
+            if i > 0 { out = str_concat(out, " :\n    ") }
+            let ta = emit_one_ternary_arm(arm.pattern, arm.body) must { ok(v) => v   err(e) => return err(e) }
+            out = str_concat(out, ta)
+            i = i + 1
+        }
+        out = str_concat(out, " : 0);\n")
+    }
+
+    out = str_concat(out, "}))")
+    return ok_s(out)
+}
+
+## ── emit_match_expr ──────────────────────────────────────────────────────────
+fn emit_match_expr(me: box<MatchExpr>) -> result<str, str> {
+    let m = box_deref(me)
+    let subj = emit_expr(m.subject) must { ok(v) => v   err(e) => return err(e) }
+    let narms = vec_len(m.arms) as i64
+    let ind1 = "    "
+    let ind2 = "        "
+
+    ## Check if any arm is terminal
+    let mut any_terminal: bool = false
+    let mut i: i64 = 0
+    loop {
+        if i >= narms { break }
+        if arm_is_terminal(m.arms[i as u64].body) { any_terminal = true }
+        i = i + 1
+    }
+
+    let mut out: str = str_concat("(__extension__ ({\n", str_concat(ind1, str_concat("__auto_type _m = ", str_concat(subj, ";\n"))))
+
+    if any_terminal {
+        ## Early-exit style for terminal arms, ternary for value arms
+        i = 0
+        loop {
+            if i >= narms { break }
+            let arm = m.arms[i as u64]
+            if arm_is_terminal(arm.body) {
+                let cond = arm_cond(arm.pattern)
+                let bind = arm_bindings(arm.pattern)
+                let tbody = emit_terminal_body_str(arm.body) must { ok(v) => v   err(e) => return err(e) }
+                out = str_concat(out, str_concat(ind1, str_concat("if (", str_concat(cond, ") {\n"))))
+                if str_len(bind) > 0 {
+                    out = str_concat(out, str_concat(ind2, str_concat(bind, "\n")))
+                }
+                out = str_concat(out, str_concat(tbody, "\n"))
+                out = str_concat(out, str_concat(ind1, "}\n"))
+            }
+            i = i + 1
+        }
+        out = str_concat(out, str_concat(ind1, "("))
+        i = 0
+        let mut first_val: bool = true
+        loop {
+            if i >= narms { break }
+            let arm = m.arms[i as u64]
+            if not arm_is_terminal(arm.body) {
+                if not first_val { out = str_concat(out, " :\n    ") }
+                first_val = false
+                let ta = emit_one_ternary_arm(arm.pattern, arm.body) must { ok(v) => v   err(e) => return err(e) }
+                out = str_concat(out, ta)
+            }
+            i = i + 1
+        }
+        out = str_concat(out, " : 0);\n")
+    } else {
+        ## Pure ternary chain
+        out = str_concat(out, str_concat(ind1, "("))
+        i = 0
+        loop {
+            if i >= narms { break }
+            let arm = m.arms[i as u64]
+            if i > 0 { out = str_concat(out, " :\n    ") }
+            let ta = emit_one_ternary_arm(arm.pattern, arm.body) must { ok(v) => v   err(e) => return err(e) }
+            out = str_concat(out, ta)
+            i = i + 1
+        }
+        out = str_concat(out, " : 0);\n")
+    }
+
+    out = str_concat(out, "}))")
+    return ok_s(out)
 }
 
 fn emit_return_expr(e: box<Expr>) -> result<str, str> {
@@ -605,9 +897,13 @@ fn emit_enum_decl(ed: EnumDecl, buf: refmut<EmBuf>) -> result<unit, str> {
     loop {
         if i >= n { break }
         let v = ed.variants[i as u64]
-        match v.payload {
-            some(pt) => emb_line(buf, str_concat("        ", str_concat(emit_type(pt), str_concat(" _v", str_concat(v.name, ";")))))
-            none     => emb_line(buf, str_concat("        char _d", str_concat(v.name, ";")))
+        let np = vec_len(v.payload) as i64
+        if np == 0 {
+            emb_line(buf, str_concat("        char _d", str_concat(v.name, ";")))
+        }
+        if np > 0 {
+            let pt = v.payload[0 as u64]
+            emb_line(buf, str_concat("        ", str_concat(emit_type(pt), str_concat(" _v", str_concat(v.name, ";")))))
         }
         i = i + 1
     }
@@ -668,7 +964,7 @@ fn emit_file_header(buf: refmut<EmBuf>, name: str) -> unit {
 
 ## ── Entry point ───────────────────────────────────────────────────────────────
 
-/// emit_c: compile a ParsedFile to a C source string.
+## emit_c: compile a ParsedFile to a C source string.
 fn emit_c(pf: ParsedFile) -> result<str, str> {
     let mut buf = emb_new()
     emit_file_header(refmut(buf), pf.name)

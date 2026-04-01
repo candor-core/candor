@@ -1,13 +1,14 @@
-## main.cnd — candorc-stage1 entry point  (M9.11)
+## main.cnd — candorc-stage1 entry point  (M9.14)
 ##
-## Usage:  candorc-stage1 <source1.cnd> [source2.cnd ...]
-##   Reads N Candor source files in dependency order, merges their
-##   declarations, runs lex→parse→typecheck→emit_c, and writes the
-##   resulting C source to stdout.
-##   Pipe through gcc to get a native binary.
+## Usage:
+##   candorc-stage1 <source.cnd> [source2.cnd ...]
+##       Merge, typecheck, and emit C for N source files (to stdout).
 ##
-## Single file:   candorc-stage1 prog.cnd
-## Multi-file:    candorc-stage1 parser.cnd typeck.cnd emit_c.cnd main.cnd
+##   candorc-stage1 --build <Candor.toml>
+##       Read manifest, compile all listed sources, write output binary.
+##
+## Stage 1 bootstrap: this binary is produced by `candorc build src/compiler/Candor.toml`
+## using the Go compiler.  Stage 2 is when this binary compiles itself.
 
 fn print_str_list(prefix: str, items: vec<str>) -> unit effects(io) {
     let n = vec_len(items) as i64
@@ -53,48 +54,80 @@ fn merge_files(files: vec<ParsedFile>) -> ParsedFile {
     return ParsedFile{ name: name, decls: decls }
 }
 
-fn main() -> unit effects(io, sys) {
-    let args = os_args()
-    let nargs = vec_len(args) as i64
-
-    if nargs < 2 {
-        print_err("usage: candorc-stage1 <source.cnd> [source2.cnd ...]")
-        return unit
-    }
-
-    ## Lex and parse each file
+## compile_files — lex+parse a list of paths, return merged ParsedFile.
+## Returns err on first read or parse failure.
+fn compile_files(paths: vec<str>) -> result<ParsedFile, str> {
+    let n = vec_len(paths) as i64
     let mut files: vec<ParsedFile> = vec_new()
-    let mut i: i64 = 1
+    let mut i: i64 = 0
     loop {
-        if i >= nargs { break }
-        let path = args[i as u64]
+        if i >= n { break }
+        let path = paths[i as u64]
 
         let src = read_file(path) must {
             ok(s)  => s
-            err(e) => {
-                print_err(str_concat("candorc-stage1: error reading file: ", e))
-                return unit
-            }
+            err(e) => return err(str_concat("error reading ", str_concat(path, str_concat(": ", e))))
         }
 
         let tokens = lex(src)
 
         let pf = parse(tokens, path) must {
             ok(p)  => p
-            err(e) => {
-                print_err(str_concat("candorc-stage1: parse error in ", str_concat(path, str_concat(": ", e))))
-                return unit
-            }
+            err(e) => return err(str_concat("parse error in ", str_concat(path, str_concat(": ", e))))
         }
 
         vec_push(files, pf)
         i = i + 1
     }
+    return ok(merge_files(files))
+}
 
-    ## Merge all files into a single bundle
-    let mut bundle = merge_files(files)
+## ── --build mode ─────────────────────────────────────────────────────────────
+fn run_build(manifest_path: str) -> unit effects(io, sys) {
+    ## Read and parse the manifest
+    let manifest_src = read_file(manifest_path) must {
+        ok(s)  => s
+        err(e) => {
+            print_err(str_concat("candorc-stage1: cannot read ", str_concat(manifest_path, str_concat(": ", e))))
+            return unit
+        }
+    }
 
-    ## Type-check
+    let m = parse_manifest(manifest_src) must {
+        ok(mf) => mf
+        err(e) => {
+            print_err(str_concat("candorc-stage1: manifest error: ", e))
+            return unit
+        }
+    }
+
+    ## Validate
+    let nsrc = vec_len(m.sources) as i64
+    if nsrc == 0 {
+        print_err("candorc-stage1: no sources listed in Candor.toml")
+        return unit
+    }
+
+    ## Resolve sources relative to manifest directory
+    let manifest_dir = path_dir(manifest_path)
+    let mut abs_sources: vec<str> = vec_new()
+    let mut i: i64 = 0
+    loop {
+        if i >= nsrc { break }
+        vec_push(abs_sources, path_join(manifest_dir, m.sources[i as u64]))
+        i = i + 1
+    }
+
+    ## Compile
+    let mut bundle = compile_files(abs_sources) must {
+        ok(b)  => b
+        err(e) => {
+            print_err(str_concat("candorc-stage1: ", e))
+            return unit
+        }
+    }
+
+    ## Typecheck
     let tf = typecheck(refmut(bundle))
     print_str_list("candorc-stage1: warning: ", tf.warnings)
     if vec_len(tf.errors) as i64 > 0 {
@@ -111,7 +144,115 @@ fn main() -> unit effects(io, sys) {
         }
     }
 
-    ## Write C to stdout
+    ## Determine output binary path
+    let mut out_bin: str = m.name
+    if str_len(m.output) > 0 {
+        out_bin = path_join(manifest_dir, m.output)
+    }
+
+    ## Write C source to a file alongside the binary
+    let c_path = str_concat(out_bin, ".c")
+    let _write_ok = write_file(c_path, c_src) must {
+        ok(_u) => unit
+        err(e) => {
+            print_err(str_concat("candorc-stage1: cannot write C file: ", e))
+            return unit
+        }
+    }
+
+    ## Resolve C compiler: $CC env var, then common MSYS2/MinGW paths, then "gcc"
+    let cc_env = os_getenv("CC") must {
+        some(s) => s
+        none    => ""
+    }
+    let mut cc: str = ""
+    if str_len(cc_env) > 0 { cc = cc_env }
+    if str_len(cc) == 0 {
+        if path_exists("C:\\msys64\\mingw64\\bin\\gcc.exe") { cc = "C:\\msys64\\mingw64\\bin\\gcc.exe" }
+    }
+    if str_len(cc) == 0 {
+        if path_exists("C:\\msys64\\ucrt64\\bin\\gcc.exe") { cc = "C:\\msys64\\ucrt64\\bin\\gcc.exe" }
+    }
+    if str_len(cc) == 0 { cc = "gcc" }
+
+    ## Invoke gcc to produce the binary
+    let mut gcc_args: vec<str> = vec_new()
+    vec_push(gcc_args, cc)
+    vec_push(gcc_args, "-o")
+    vec_push(gcc_args, out_bin)
+    vec_push(gcc_args, c_path)
+
+    let exit_code = os_exec(gcc_args) must {
+        ok(code) => code
+        err(e)   => {
+            print_err(str_concat("candorc-stage1: cannot launch gcc: ", e))
+            return unit
+        }
+    }
+
+    if exit_code != 0 {
+        print_err(str_concat("candorc-stage1: gcc failed with exit code ", int_to_str(exit_code)))
+        return unit
+    }
+
+    print_err(str_concat("candorc-stage1: built ", out_bin))
+    return unit
+}
+
+## ── entry point ──────────────────────────────────────────────────────────────
+fn main() -> unit effects(io, sys) {
+    let args = os_args()
+    let nargs = vec_len(args) as i64
+
+    if nargs < 2 {
+        print_err("usage: candorc-stage1 <source.cnd> [...]  or  candorc-stage1 --build <Candor.toml>")
+        return unit
+    }
+
+    ## --build mode: read manifest and compile
+    if str_eq(args[1], "--build") {
+        if nargs < 3 {
+            print_err("usage: candorc-stage1 --build <Candor.toml>")
+            return unit
+        }
+        run_build(args[2])
+        return unit
+    }
+
+    ## Direct source file mode: emit C to stdout
+    let mut paths: vec<str> = vec_new()
+    let mut i: i64 = 1
+    loop {
+        if i >= nargs { break }
+        vec_push(paths, args[i as u64])
+        i = i + 1
+    }
+
+    let mut bundle = compile_files(paths) must {
+        ok(b)  => b
+        err(e) => {
+            print_err(str_concat("candorc-stage1: ", e))
+            return unit
+        }
+    }
+
+    ## Type-check
+    let tf = typecheck(refmut(bundle))
+    print_str_list("candorc-stage1: warning: ", tf.warnings)
+    if vec_len(tf.errors) as i64 > 0 {
+        print_str_list("candorc-stage1: type error: ", tf.errors)
+        return unit
+    }
+
+    ## Emit C to stdout
+    let c_src = emit_c(bundle) must {
+        ok(c)  => c
+        err(e) => {
+            print_err(str_concat("candorc-stage1: emit error: ", e))
+            return unit
+        }
+    }
+
     print(c_src)
     return unit
 }

@@ -2204,10 +2204,17 @@ func (e *emitter) emitFnBody(block *parser.BlockStmt, depth int) error {
 	// Emit the last statement. If it is a bare expression in a non-unit
 	// function, wrap it in a return so that tail match/must expressions
 	// return their value instead of silently discarding it.
+	// Exception: if the expression has unit/never type (e.g. a match where all
+	// arms explicitly return), emit it as a plain statement — wrapping a void
+	// statement expression in "return ..." produces a GCC error.
 	last := stmts[len(stmts)-1]
 	if !e.retIsUnit && !e.isMain {
 		if es, ok := last.(*parser.ExprStmt); ok {
-			return e.emitTailReturn(es.X, depth)
+			exprType := e.res.ExprTypes[es.X]
+			isVoidLike := exprType == nil || exprType.Equals(typeck.TUnit) || exprType.Equals(typeck.TNever)
+			if !isVoidLike {
+				return e.emitTailReturn(es.X, depth)
+			}
 		}
 	}
 	return e.emitStmt(last, depth)

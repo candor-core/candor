@@ -228,7 +228,7 @@ fn struct_def_get_field(sd: ref<StructDef>, name: str) -> option<Type> {
 }
 
 ## ── enum variant registry ─────────────────────────────────────────────────────
-struct VariantDef { name: str, payload: option<Type> }
+struct VariantDef { name: str, payload: vec<Type> }
 struct EnumDef    { name: str, variants: vec<VariantDef> }
 
 fn enum_def_get_variant(ed: ref<EnumDef>, name: str) -> option<VariantDef> {
@@ -503,10 +503,12 @@ fn field_def_unknown(fname: str, sname: str, e: str, env: refmut<TypeEnv>) -> Fi
     return FieldDef{ name: fname, typ: ty_unknown() }
 }
 
-fn variant_payload_unknown(ename: str, vname: str, e: str, env: refmut<TypeEnv>) -> option<Type> {
+fn variant_payload_unknown(ename: str, vname: str, e: str, env: refmut<TypeEnv>) -> vec<Type> {
     env_error(env, str_concat("enum ", str_concat(ename,
         str_concat("::", str_concat(vname, str_concat(": ", e))))))
-    return some(ty_unknown())
+    let mut r: vec<Type> = vec_new()
+    vec_push(r, ty_unknown())
+    return r
 }
 
 fn empty_params_with_err(prefix: str, e: str, env: refmut<TypeEnv>) -> vec<ParamSig> {
@@ -535,22 +537,29 @@ fn resolve_ret_or(ret_te: TypeExpr, prefix: str, env: refmut<TypeEnv>) -> Type {
     }
 }
 
-fn fill_variant_payload(te: TypeExpr, ename: str, vname: str, env: refmut<TypeEnv>) -> option<Type> {
+fn fill_variant_payload(te: TypeExpr, ename: str, vname: str, env: refmut<TypeEnv>) -> Type {
     resolve_type(te, env) must {
-        ok(t)  => some(t)
-        err(e) => variant_payload_unknown(ename, vname, e, env)
+        ok(t)  => t
+        err(e) => {
+            env_error(env, str_concat("enum ", str_concat(ename,
+                str_concat("::", str_concat(vname, str_concat(": ", e))))))
+            ty_unknown()
+        }
     }
 }
 
-## none_type_opt: returns option<Type> none so must arms can match option<Type>.
-fn none_type_opt() -> option<Type> pure { return none }
-
-fn resolve_variant_payload(payload: option<TypeExpr>, ename: str, vname: str,
-                            env: refmut<TypeEnv>) -> option<Type> {
-    payload must {
-        none     => none_type_opt()
-        some(te) => fill_variant_payload(te, ename, vname, env)
+fn resolve_variant_payload(payload: vec<TypeExpr>, ename: str, vname: str,
+                            env: refmut<TypeEnv>) -> vec<Type> {
+    let n = vec_len(payload) as i64
+    let mut result: vec<Type> = vec_new()
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let t = fill_variant_payload(payload[i as u64], ename, vname, env)
+        vec_push(result, t)
+        i = i + 1
     }
+    return result
 }
 
 fn fill_struct_field(f: StructFieldDecl, sname: str, env: refmut<TypeEnv>) -> FieldDef {
@@ -759,7 +768,8 @@ fn infer_cmp(a: Type, b: Type) -> result<Type, str> {
 }
 
 fn infer_logic(a: Type, b: Type) -> result<Type, str> {
-    if ty_is_bool(a) and ty_is_bool(b) { return ok_type(ty_bool()) }
+    if ty_is_unknown(a) or ty_is_unknown(b)      { return ok_type(ty_bool()) }
+    if ty_is_bool(a) and ty_is_bool(b)           { return ok_type(ty_bool()) }
     return err_type("expected bool operands for logical operator")
 }
 
@@ -836,7 +846,7 @@ fn infer_unop(u: box<UnExpr>, ss: ref<ScopeStack>, env: ref<TypeEnv>) -> result<
         return err_type("unary - requires a numeric type")
     }
     if ue.op == UOP_NOT() {
-        if ty_is_bool(t) { return ok_type(ty_bool()) }
+        if ty_is_bool(t) or ty_is_unknown(t) { return ok_type(ty_bool()) }
         return err_type("not requires a bool operand")
     }
     return err_type("unknown unary operator")
@@ -1023,6 +1033,26 @@ fn ty_compat(src: Type, dst: Type) -> bool {
     if ty_coerce(src, dst)                       { return true }
     if ty_is_int_lit(src) and ty_is_int(dst)     { return true }
     if ty_is_float_lit(src) and ty_is_float(dst) { return true }
+    ## Structural compat for generic types: propagate unknown into type params.
+    ## Handles ok(v)→result<T,unknown> vs result<T,str>, some(x)→option<unknown> vs option<T>.
+    if src.kind == TYK_GEN() and dst.kind == TYK_GEN() {
+        if str_eq(src.name, dst.name) {
+            let ns = vec_len(src.params) as i64
+            let nd = vec_len(dst.params) as i64
+            if ns == nd {
+                let mut all_ok: bool = true
+                let mut i: i64 = 0
+                loop {
+                    if i >= ns { break }
+                    if not ty_compat(src.params[i as u64], dst.params[i as u64]) {
+                        all_ok = false
+                    }
+                    i = i + 1
+                }
+                return all_ok
+            }
+        }
+    }
     return false
 }
 
