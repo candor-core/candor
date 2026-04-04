@@ -10,10 +10,43 @@
 
 ## ── accumulator ───────────────────────────────────────────────────────────────
 
-struct EmBuf { parts: vec<str> }
+struct EmBuf { parts: vec<str>, declared: vec<str> }
 
 fn emb_new() -> EmBuf {
-    return EmBuf{ parts: vec_new() }
+    return EmBuf{ parts: vec_new(), declared: vec_new() }
+}
+
+## Returns true if name was already in declared list (and does NOT add it again).
+## Returns false if name is new — adds it to the list.
+fn emb_declare(b: refmut<EmBuf>, name: str) -> bool {
+    let n = vec_len(b.declared) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        if str_eq(b.declared[i as u64], name) { return true }
+        i = i + 1
+    }
+    vec_push(b.declared, name)
+    return false
+}
+
+## Save current declared list as a snapshot (for scope entry/exit).
+fn emb_scope_save(b: ref<EmBuf>) -> vec<str> {
+    let n = vec_len(b.declared) as i64
+    let mut copy: vec<str> = vec_new()
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        vec_push(copy, b.declared[i as u64])
+        i = i + 1
+    }
+    return copy
+}
+
+## Restore declared list to a previously saved snapshot.
+fn emb_scope_restore(b: refmut<EmBuf>, saved: vec<str>) -> unit {
+    b.declared = saved
+    return unit
 }
 
 fn emb_push(b: refmut<EmBuf>, s: str) -> unit {
@@ -301,6 +334,23 @@ fn emit_call(c: box<CallExpr>, pp: str, rc: str) -> result<str, str> {
     ## ── Builtin special cases ──────────────────────────────────────────────
     let bname = emit_callee_name(ce.callee)
 
+    ## box_deref(p) → (*p)
+    if str_eq(bname, "box_deref") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v   err(e) => return err(e) }
+        return ok_s(str_concat("(*", str_concat(a0, ")")))
+    }
+    ## box_new(val) → ({ T* __b = malloc(sizeof(*__b)); *__b = val; __b; })
+    ## We can't know T at this point so we use __typeof__
+    if str_eq(bname, "box_new") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v   err(e) => return err(e) }
+        return ok_s(str_concat("(__extension__ ({ __auto_type _bval = ", str_concat(a0, str_concat("; __typeof__(_bval)* _bp = (__typeof__(_bval)*)malloc(sizeof(_bval)); *_bp = _bval; _bp; }))", ""))))
+    }
+    ## box_drop(p) → free(p)
+    if str_eq(bname, "box_drop") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v   err(e) => return err(e) }
+        return ok_s(str_concat("free(", str_concat(a0, ")")))
+    }
+
     ## vec_new() → zero-initialised struct literal {0}
     if str_eq(bname, "vec_new") {
         return ok_s("{0}")
@@ -416,6 +466,29 @@ fn emit_call(c: box<CallExpr>, pp: str, rc: str) -> result<str, str> {
     if str_eq(bname, "os_exit") and n_args >= 1 {
         let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
         return ok_s(str_concat("exit((int)(", str_concat(a0, "))")))
+    }
+    ## map_new() → zero-initialised struct literal {0}
+    if str_eq(bname, "map_new") {
+        return ok_s("{0}")
+    }
+    ## map_insert(m, k, v) → dispatch to typed helper via runtime macro
+    if str_eq(bname, "map_insert") and n_args >= 3 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        let a1 = emit_expr(ce.args[1 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        let a2 = emit_expr(ce.args[2 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("_cnd_map_insert(&", str_concat(a0, str_concat(", ", str_concat(a1, str_concat(", ", str_concat(a2, ")")))))))
+    }
+    ## map_get(m, k) → dispatch to typed helper via runtime macro
+    if str_eq(bname, "map_get") and n_args >= 2 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        let a1 = emit_expr(ce.args[1 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("_cnd_map_get(", str_concat(a0, str_concat(", ", str_concat(a1, ")")))))
+    }
+    ## map_contains(m, k) → dispatch to typed helper via runtime macro
+    if str_eq(bname, "map_contains") and n_args >= 2 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        let a1 = emit_expr(ce.args[1 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("_cnd_map_contains(", str_concat(a0, str_concat(", ", str_concat(a1, ")")))))
     }
     ## os_args() → build vec<str> from _cnd_argc/_cnd_argv
     if str_eq(bname, "os_args") {
@@ -794,21 +867,33 @@ fn emit_match_expr(me: box<MatchExpr>, pp: str, rc: str) -> result<str, str> {
             }
             i = i + 1
         }
-        out = str_concat(out, str_concat(ind1, "("))
+        ## Only emit value ternary if there are non-terminal arms
+        let mut has_val_arms: bool = false
         i = 0
-        let mut first_val: bool = true
         loop {
             if i >= narms { break }
-            let arm = m.arms[i as u64]
-            if not arm_is_terminal(arm.body) {
-                if not first_val { out = str_concat(out, " :\n    ") }
-                first_val = false
-                let ta = emit_one_ternary_arm(arm.pattern, arm.body, pp, rc) must { ok(v) => v   err(e) => return err(e) }
-                out = str_concat(out, ta)
-            }
+            if not arm_is_terminal(m.arms[i as u64].body) { has_val_arms = true }
             i = i + 1
         }
-        out = str_concat(out, " : 0);\n")
+        if has_val_arms {
+            out = str_concat(out, str_concat(ind1, "("))
+            i = 0
+            let mut first_val: bool = true
+            loop {
+                if i >= narms { break }
+                let arm = m.arms[i as u64]
+                if not arm_is_terminal(arm.body) {
+                    if not first_val { out = str_concat(out, " :\n    ") }
+                    first_val = false
+                    let ta = emit_one_ternary_arm(arm.pattern, arm.body, pp, rc) must { ok(v) => v   err(e) => return err(e) }
+                    out = str_concat(out, ta)
+                }
+                i = i + 1
+            }
+            out = str_concat(out, " : 0);\n")
+        } else {
+            out = str_concat(out, str_concat(ind1, "((void)0);\n"))
+        }
     } else {
         ## Pure ternary chain
         out = str_concat(out, str_concat(ind1, "("))
@@ -900,14 +985,20 @@ fn emit_continue_stmt(buf: refmut<EmBuf>, ind: str) -> result<unit, str> {
 }
 
 fn emit_let_stmt(ls: LetStmt, buf: refmut<EmBuf>, indent: i64, ind: str, pp: str, rc: str) -> result<unit, str> {
-    let ctype = match ls.typ {
-        some(t) => emit_type(t)
-        none    => "auto"
-    }
+    let cname = c_ident(ls.name)
     let init = emit_expr(ls.init, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
-    emb_line(buf, str_concat(ind, str_concat(ctype, str_concat(" ", str_concat(c_ident(ls.name), str_concat(" = ", str_concat(init, ";")))))))
+    ## If variable already declared in this scope, emit as assignment (avoids C redefinition).
+    if emb_declare(buf, cname) {
+        emb_line(buf, str_concat(ind, str_concat(cname, str_concat(" = ", str_concat(init, ";")))))
+    } else {
+        let ctype = match ls.typ {
+            some(t) => emit_type(t)
+            none    => "auto"
+        }
+        emb_line(buf, str_concat(ind, str_concat(ctype, str_concat(" ", str_concat(cname, str_concat(" = ", str_concat(init, ";")))))))
+    }
     return ok_u()
 }
 
@@ -959,9 +1050,11 @@ fn emit_if_stmt(is_: IfStmt, buf: refmut<EmBuf>, indent: i64, ind: str, pp: str,
         ok(v) => v   err(e) => return err(e)
     }
     emb_line(buf, str_concat(ind, str_concat("if (", str_concat(cond, ") {"))))
+    let saved = emb_scope_save(buf)
     emit_stmts(is_.then_, buf, indent + 1, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
+    emb_scope_restore(buf, saved)
     match is_.else_ {
         some(eb) => emit_else_branch(box_deref(eb), buf, indent, ind, pp, rc)
         none     => emit_close_brace(buf, ind)
@@ -976,9 +1069,11 @@ fn emit_else_branch(eb: IfOrBlock, buf: refmut<EmBuf>, indent: i64, ind: str, pp
         }
         IfOrBlock::ElseBlock(stmts) => {
             emb_line(buf, str_concat(ind, "} else {"))
+            let saved = emb_scope_save(buf)
             emit_stmts(stmts, buf, indent + 1, pp, rc) must {
                 ok(v) => v   err(e) => return err(e)
             }
+            emb_scope_restore(buf, saved)
             emb_line(buf, str_concat(ind, "}"))
             ok_u()
         }
@@ -990,18 +1085,22 @@ fn emit_while_stmt(ws: WhileStmt, buf: refmut<EmBuf>, indent: i64, ind: str, pp:
         ok(v) => v   err(e) => return err(e)
     }
     emb_line(buf, str_concat(ind, str_concat("while (", str_concat(cond, ") {"))))
+    let saved = emb_scope_save(buf)
     emit_stmts(ws.body, buf, indent + 1, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
+    emb_scope_restore(buf, saved)
     emb_line(buf, str_concat(ind, "}"))
     return ok_u()
 }
 
 fn emit_loop_stmt(body: vec<Stmt>, buf: refmut<EmBuf>, indent: i64, ind: str, pp: str, rc: str) -> result<unit, str> {
     emb_line(buf, str_concat(ind, "while (1) {"))
+    let saved = emb_scope_save(buf)
     emit_stmts(body, buf, indent + 1, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
+    emb_scope_restore(buf, saved)
     emb_line(buf, str_concat(ind, "}"))
     return ok_u()
 }
@@ -1143,9 +1242,13 @@ fn type_to_res_struct(te: TypeExpr) -> str {
                 let m1 = mangle_ctype(err_c)
                 let tname = str_concat("_CndRes_", str_concat(m0, str_concat("_", m1)))
                 let guard = str_concat("_CNDRES_", str_concat(m0, str_concat("_", m1)))
-                ## Build struct body: always has _ok and _err_val; _ok_val only if ok_c != "void"
+                ## Build struct body: _ok, _ok_val (int dummy for void ok type), _err_val
                 let mut ok_field = ""
-                if str_eq(ok_c, "void") { ok_field = "" } else { ok_field = str_concat("    ", str_concat(ok_c, " _ok_val;\n")) }
+                if str_eq(ok_c, "void") {
+                    ok_field = "    int _ok_val;\n"   ## dummy so ok(v) bindings compile
+                } else {
+                    ok_field = str_concat("    ", str_concat(ok_c, " _ok_val;\n"))
+                }
                 let body = str_concat("    int _ok;\n", str_concat(ok_field, str_concat("    ", str_concat(err_c, " _err_val;\n"))))
                 return str_concat("#ifndef ", str_concat(guard, str_concat("\n#define ", str_concat(guard, str_concat("\ntypedef struct { ", str_concat(body, str_concat("} ", str_concat(tname, ";\n#endif\n"))))))))
             }
@@ -1153,6 +1256,211 @@ fn type_to_res_struct(te: TypeExpr) -> str {
         }
         _ => return ""
     }
+}
+
+## Generate forward-declaration typedefs + the _CndMap struct body.
+## The _CndMap struct only uses entry** (pointer), so it can go early.
+fn type_to_map_typedefs(te: TypeExpr) -> str {
+    match te {
+        TypeExpr::Generic(g) => {
+            let gt = box_deref(g)
+            if str_eq(gt.name, "map") and vec_len(gt.args) >= 2 {
+                let key_c = emit_type(gt.args[0])
+                let val_c = emit_type(gt.args[1])
+                let km = mangle_ctype(key_c)
+                let vm = mangle_ctype(val_c)
+                let ename = str_concat("_CndMapEntry_", str_concat(km, str_concat("_", vm)))
+                let mname = str_concat("_CndMap_", str_concat(km, str_concat("_", vm)))
+                let guard = str_concat("_CNDMAP_FWD_", str_concat(km, str_concat("_", vm)))
+                let td1 = str_concat("typedef struct ", str_concat(ename, str_concat(" ", str_concat(ename, ";"))))
+                let td2 = str_concat("typedef struct ", str_concat(mname, str_concat(" ", str_concat(mname, ";"))))
+                let sd2 = str_concat("struct ", str_concat(mname, str_concat(" { struct ", str_concat(ename, "** _buckets; uint64_t _cap; uint64_t _len; };"))))
+                return str_concat("#ifndef ", str_concat(guard, str_concat("\n#define ", str_concat(guard, str_concat("\n", str_concat(td1, str_concat("\n", str_concat(td2, str_concat("\n", str_concat(sd2, "\n#endif\n"))))))))))
+            }
+            return ""
+        }
+        _ => return ""
+    }
+}
+
+## Generate the _CndMapEntry struct body only (requires V to be complete).
+fn type_to_map_struct_bodies(te: TypeExpr) -> str {
+    match te {
+        TypeExpr::Generic(g) => {
+            let gt = box_deref(g)
+            if str_eq(gt.name, "map") and vec_len(gt.args) >= 2 {
+                let key_c = emit_type(gt.args[0])
+                let val_c = emit_type(gt.args[1])
+                let km = mangle_ctype(key_c)
+                let vm = mangle_ctype(val_c)
+                let ename = str_concat("_CndMapEntry_", str_concat(km, str_concat("_", vm)))
+                let guard = str_concat("_CNDMAP_ENTRY_", str_concat(km, str_concat("_", vm)))
+                let sd1 = str_concat("struct ", str_concat(ename, str_concat(" { ", str_concat(key_c, str_concat(" _key; ", str_concat(val_c, str_concat(" _val; struct ", str_concat(ename, "* _next; };"))))))))
+                return str_concat("#ifndef ", str_concat(guard, str_concat("\n#define ", str_concat(guard, str_concat("\n", str_concat(sd1, "\n#endif\n"))))))
+            }
+            return ""
+        }
+        _ => return ""
+    }
+}
+
+## Generate map hash/eq/new/insert/get/remove/contains helpers for one map<K,V> TypeExpr.
+## Map helpers are now handled by generic macros in _cnd_runtime.h
+fn type_to_map_helpers(te: TypeExpr) -> str {
+    return ""
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+## Walk a TypeExpr and collect map typedef lines.
+fn collect_map_lines_from_type(te: TypeExpr) -> vec<str> {
+    let mut lines: vec<str> = vec_new()
+    let direct = type_to_map_typedefs(te)
+    if str_len(direct) > 0 {
+        vec_push(lines, direct)
+    }
+    match te {
+        TypeExpr::Generic(g) => {
+            let gt = box_deref(g)
+            let argc = vec_len(gt.args) as i64
+            let mut ai: i64 = 0
+            loop {
+                if ai >= argc { break }
+                let sub = collect_map_lines_from_type(gt.args[ai as u64])
+                let sn = vec_len(sub) as i64
+                let mut si: i64 = 0
+                loop {
+                    if si >= sn { break }
+                    vec_push(lines, sub[si as u64])
+                    si = si + 1
+                }
+                ai = ai + 1
+            }
+        }
+        _ => unit
+    }
+    return lines
+}
+
+## Walk a TypeExpr and collect map struct body lines.
+fn collect_map_helpers_from_type(te: TypeExpr) -> vec<str> {
+    let mut lines: vec<str> = vec_new()
+    let direct = type_to_map_struct_bodies(te)
+    if str_len(direct) > 0 {
+        vec_push(lines, direct)
+    }
+    match te {
+        TypeExpr::Generic(g) => {
+            let gt = box_deref(g)
+            let argc = vec_len(gt.args) as i64
+            let mut ai: i64 = 0
+            loop {
+                if ai >= argc { break }
+                let sub = collect_map_helpers_from_type(gt.args[ai as u64])
+                let sn = vec_len(sub) as i64
+                let mut si: i64 = 0
+                loop {
+                    if si >= sn { break }
+                    vec_push(lines, sub[si as u64])
+                    si = si + 1
+                }
+                ai = ai + 1
+            }
+        }
+        _ => unit
+    }
+    return lines
+}
+
+## Append all map typedef lines from a list of TypeExprs into `out`.
+fn collect_map_lines_from_types(types: vec<TypeExpr>, out: refmut<EmBuf>) -> unit {
+    let n = vec_len(types) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let lines = collect_map_lines_from_type(types[i as u64])
+        let ln = vec_len(lines) as i64
+        let mut li: i64 = 0
+        loop {
+            if li >= ln { break }
+            emb_push(out, lines[li as u64])
+            li = li + 1
+        }
+        i = i + 1
+    }
+    return unit
+}
+
+## Append all map helper lines from a list of TypeExprs into `out`.
+fn collect_map_helpers_from_types(types: vec<TypeExpr>, out: refmut<EmBuf>) -> unit {
+    let n = vec_len(types) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let lines = collect_map_helpers_from_type(types[i as u64])
+        let ln = vec_len(lines) as i64
+        let mut li: i64 = 0
+        loop {
+            if li >= ln { break }
+            emb_push(out, lines[li as u64])
+            li = li + 1
+        }
+        i = i + 1
+    }
+    return unit
 }
 
 ## Walk a TypeExpr and collect vec struct-only typedefs (no push/pop) for all vec<T> types found.
@@ -1393,9 +1701,13 @@ fn emit_fn_decl(f: FnDecl, buf: refmut<EmBuf>) -> result<unit, str> {
     let pp = collect_ptr_params_str(f.params)
     let sig = str_concat(ret, str_concat(" ", str_concat(c_ident(f.name), str_concat("(", str_concat(params, ")")))))
     emb_line(buf, str_concat(sig, " {"))
+    ## Each function body is a new scope — reset declared vars.
+    let saved = emb_scope_save(buf)
+    buf.declared = vec_new()
     emit_stmts(f.body, buf, 1, pp, ret) must {
         ok(v) => v   err(e) => return err(e)
     }
+    emb_scope_restore(buf, saved)
     emb_line(buf, "}")
     emb_line(buf, "")
     return ok_u()
@@ -1628,6 +1940,10 @@ fn emit_c(pf: ParsedFile) -> result<str, str> {
     collect_vec_lines_from_types(all_types_buf.types, refmut(buf))
     emb_line(refmut(buf), "")
 
+    ## Pass 2b: emit map struct typedefs (entry + map structs, before struct/enum bodies).
+    collect_map_lines_from_types(all_types_buf.types, refmut(buf))
+    emb_line(refmut(buf), "")
+
     ## Pass 3a: emit enum full definitions first (so enum types are complete before structs use them by value).
     i = 0
     loop {
@@ -1659,6 +1975,10 @@ fn emit_c(pf: ParsedFile) -> result<str, str> {
 
     ## Pass 3c: emit vec push/pop helpers AFTER all struct defs (T must be complete for by-value ops).
     collect_vec_helpers_from_types(all_types_buf.types, refmut(buf))
+    emb_line(refmut(buf), "")
+
+    ## Pass 3d: emit map struct bodies AFTER all struct/enum defs (V must be complete for by-value ops).
+    collect_map_helpers_from_types(all_types_buf.types, refmut(buf))
     emb_line(refmut(buf), "")
 
     ## Pass 4: emit result struct definitions (guarded with #ifndef).
