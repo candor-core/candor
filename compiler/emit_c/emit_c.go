@@ -5517,6 +5517,17 @@ func (e *emitter) emitMustOrMatch(x parser.Expr, arms []parser.MustArm, bodyType
 		// BlockExpr arms emit their statements directly into sb.
 		if blkArm, ok := arm.Body.(*parser.BlockExpr); ok {
 			stmts := blkArm.Stmts
+			// Each arm is a separate C scope (if/else-if body). Save declaredVars
+			// so that variables declared in one arm don't appear as "already
+			// declared" in sibling arms, which would cause C undeclared-variable
+			// errors when the second arm emits `x = ...` instead of `T x = ...`.
+			var savedArmVars map[string]bool
+			if e.declaredVars != nil {
+				savedArmVars = make(map[string]bool, len(e.declaredVars))
+				for k, v := range e.declaredVars {
+					savedArmVars[k] = v
+				}
+			}
 			// When the match produces a non-unit value, the last statement in a
 			// block arm must assign its expression value to `res`.  Detect whether
 			// the tail statement is an ExprStmt so we can handle it specially.
@@ -5555,6 +5566,10 @@ func (e *emitter) emitMustOrMatch(x parser.Expr, arms []parser.MustArm, bodyType
 				// correctly after the restored content; if sb is a different builder
 				// it simply appends there.
 				fmt.Fprint(sb, stmtStr)
+			}
+			// Restore declaredVars to what it was before this arm.
+			if savedArmVars != nil {
+				e.declaredVars = savedArmVars
 			}
 			_ = armType
 		} else {

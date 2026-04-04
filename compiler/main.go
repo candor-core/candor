@@ -954,6 +954,13 @@ func runCompile(srcPaths []string, outPath string, cfg BuildConfig) error {
 		return err
 	}
 
+	// Write _cnd_runtime.h alongside the .c file so that Candor-level emitters
+	// (emit_c.cnd) can #include it when compiling their own output.
+	rtPath := filepath.Join(filepath.Dir(cPath), "_cnd_runtime.h")
+	if err := os.WriteFile(rtPath, []byte(emit_c.RuntimeHeader()), 0o644); err != nil {
+		return err
+	}
+
 	if outPath == "" {
 		outPath = base
 		if isWindows() {
@@ -1124,6 +1131,8 @@ func findCC() string {
 	// On Windows, check common MSYS2/MinGW installations.
 	if isWindows() {
 		for _, candidate := range []string{
+			`C:\msys64v2026\mingw64\bin\gcc.exe`,
+			`C:\msys64v2026\ucrt64\bin\gcc.exe`,
 			`C:\msys64\mingw64\bin\gcc.exe`,
 			`C:\msys64\ucrt64\bin\gcc.exe`,
 			`C:\MinGW\bin\gcc.exe`,

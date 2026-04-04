@@ -1,4 +1,4 @@
-## emit_c.cnd — C code generator written in Candor  (M9.6)
+## emit_c.cnd — C code generator written in Candor  (M9.14)
 ##
 ## Input:  ParsedFile  (from parser.cnd)
 ## Output: result<str, str>   (C source text or error message)
@@ -55,6 +55,17 @@ fn em_indent(level: i64) -> str {
 fn ok_s(s: str) -> result<str, str> { return ok(s) }
 fn ok_u() -> result<unit, str> { return ok(unit) }
 
+## ── C type name mangling ──────────────────────────────────────────────────────
+## Mangle a C type string into a valid C identifier fragment.
+
+fn mangle_ctype(s: str) -> str {
+    let s1 = str_replace(s, " ", "_")
+    let s2 = str_replace(s1, "*", "ptr")
+    let s3 = str_replace(s2, "<", "_")
+    let s4 = str_replace(s3, ">", "_")
+    return str_replace(s4, ",", "_")
+}
+
 ## ── C type name from Candor TypeExpr ─────────────────────────────────────────
 
 fn emit_type(te: TypeExpr) -> str {
@@ -95,62 +106,117 @@ fn emit_type_gen(g: box<GenTy>) -> str {
     if str_eq(nm, "ptr")    { return str_concat(p0, "*") }
     if str_eq(nm, "ref")    { return str_concat("const ", str_concat(p0, "*")) }
     if str_eq(nm, "refmut") { return str_concat(p0, "*") }
-    if str_eq(nm, "vec")    { return str_concat("_CndVec_", p0) }
-    if str_eq(nm, "option") { return str_concat("_CndOpt_", p0) }
-    if str_eq(nm, "cap")    { return str_concat("_CndCap_", p0) }
+    if str_eq(nm, "vec")    { return str_concat("_CndVec_", mangle_ctype(p0)) }
+    if str_eq(nm, "option") { return str_concat(p0, "*") }
+    if str_eq(nm, "cap")    { return str_concat("_CndCap_", mangle_ctype(p0)) }
     if argc >= 2 {
         let p1 = emit_type(gt.args[1])
         if str_eq(nm, "result") {
-            return str_concat("_CndRes_", str_concat(p0, str_concat("_", p1)))
+            return str_concat("_CndRes_", str_concat(mangle_ctype(p0), str_concat("_", mangle_ctype(p1))))
         }
     }
-    if str_eq(nm, "task") { return str_concat("_CndTask_", p0) }
-    let mut s = str_concat(nm, "_")
+    if str_eq(nm, "task") { return str_concat("_CndTask_", mangle_ctype(p0)) }
+    if argc >= 2 {
+        let p1 = emit_type(gt.args[1])
+        if str_eq(nm, "map") {
+            return str_concat("_CndMap_", str_concat(mangle_ctype(p0), str_concat("_", mangle_ctype(p1))))
+        }
+    }
+    ## Fallback: mangle all args to produce a valid C identifier
+    let mut s = str_concat("_Cnd_", str_concat(nm, "_"))
     let n = vec_len(gt.args) as i64
     let mut i: i64 = 0
     loop {
         if i >= n { break }
         if i > 0 { s = str_concat(s, "_") }
-        s = str_concat(s, emit_type(gt.args[i as u64]))
+        s = str_concat(s, mangle_ctype(emit_type(gt.args[i as u64])))
         i = i + 1
     }
     return s
 }
 
-## ── Expression emission ───────────────────────────────────────────────────────
+## ── Pointer-param tracking helpers ───────────────────────────────────────────
+## Track which function parameters are ref/refmut (C pointers) so field access
+## uses -> instead of .
 
-fn emit_expr(e: Expr) -> result<str, str> {
+fn is_ref_or_refmut(te: TypeExpr) -> bool {
+    match te {
+        TypeExpr::Generic(g) => {
+            let gt = box_deref(g)
+            str_eq(gt.name, "ref") or str_eq(gt.name, "refmut")
+        }
+        _ => false
+    }
+}
+
+## Build a pipe-delimited string of parameter names that are ref/refmut.
+fn collect_ptr_params_str(params: vec<Param>) -> str {
+    let n = vec_len(params)
+    let mut s: str = ""
+    let mut i: u64 = 0
+    loop {
+        if i >= n { break }
+        let p = params[i]
+        if is_ref_or_refmut(p.typ) {
+            if str_len(s) > 0 { s = str_concat(s, "|") }
+            s = str_concat(s, p.name)
+        }
+        i = i + 1
+    }
+    return s
+}
+
+## Check whether `name` appears in the pipe-delimited pointer-params string.
+fn is_ptr_param(name: str, pp: str) -> bool {
+    if str_len(pp) == 0 { return false }
+    let needle = str_concat("|", str_concat(name, "|"))
+    let hay = str_concat("|", str_concat(pp, "|"))
+    match str_find(hay, needle, 0) {
+        some(_) => true
+        none    => false
+    }
+}
+
+## ── Expression emission ───────────────────────────────────────────────────────
+## pp = pipe-delimited pointer-param names for the current function
+## rc = C return type string for the current function (used for ok/err/unit returns)
+
+fn emit_expr(e: Expr, pp: str, rc: str) -> result<str, str> {
     match e {
         Expr::Int(s)         => ok_s(s)
         Expr::Float(s)       => ok_s(s)
         Expr::Str(s)         => ok_s(s)  ## lexeme already includes the surrounding quotes
         Expr::Bool(b)        => ok_s(bool_to_c_lit(b))
         Expr::Unit           => ok_s("/* unit */0")
-        Expr::None           => ok_s("{0}")
-        Expr::Ident(s)       => ok_s(c_ident(s))
+        Expr::None           => ok_s("NULL")
+        Expr::Ident(s)       => {
+            if str_eq(s, "unit") { return ok_s("((void)0)") }
+            if str_eq(s, "none") { return ok_s("NULL") }
+            return ok_s(c_ident(s))
+        }
         Expr::Path(a, b)         => ok_s(str_concat(c_ident(a), str_concat("__", c_ident(b))))
         Expr::PathBind(a, b, _c) => ok_s(str_concat(c_ident(a), str_concat("__", c_ident(b))))
-        Expr::Binary(b)      => emit_binary(b)
-        Expr::Unary(u)       => emit_unary(u)
-        Expr::Cast(c)        => emit_cast(c)
-        Expr::Call(c)        => emit_call(c)
-        Expr::Field(f)       => emit_field(f)
-        Expr::Index(i)       => emit_index(i)
-        Expr::StructLit(s)   => emit_struct_lit(s)
+        Expr::Binary(b)      => emit_binary(b, pp, rc)
+        Expr::Unary(u)       => emit_unary(u, pp, rc)
+        Expr::Cast(c)        => emit_cast(c, pp, rc)
+        Expr::Call(c)        => emit_call(c, pp, rc)
+        Expr::Field(f)       => emit_field(f, pp, rc)
+        Expr::Index(i)       => emit_index(i, pp, rc)
+        Expr::StructLit(s)   => emit_struct_lit(s, pp, rc)
         Expr::VecLit(vs)     => ok_s("_cnd_vec_empty()")
         Expr::TupleLit(ts)   => ok_s("/* tuple */{0}")
-        Expr::AddrOf(e)      => emit_addr_of(e)
+        Expr::AddrOf(e)      => emit_addr_of(e, pp, rc)
         Expr::Lambda(l)      => ok_s("/* lambda */NULL")
-        Expr::Block(b)       => emit_block_expr(b)
-        Expr::Match(m)       => emit_match_expr(m)
-        Expr::Must(m)        => emit_must_expr(m)
-        Expr::Return(e)      => emit_return_expr(e)
+        Expr::Block(b)       => emit_block_expr(b, pp, rc)
+        Expr::Match(m)       => emit_match_expr(m, pp, rc)
+        Expr::Must(m)        => emit_must_expr(m, pp, rc)
+        Expr::Return(e)      => emit_return_expr(e, pp, rc)
         Expr::Break          => ok_s("/* break */")
         Expr::Continue       => ok_s("/* continue */")
-        Expr::SomeExpr(e)    => emit_some_expr(e)
-        Expr::OkExpr(e)      => emit_ok_expr(e)
-        Expr::ErrExpr(e)     => emit_err_expr(e)
-        Expr::OldExpr(e)     => emit_expr(box_deref(e))
+        Expr::SomeExpr(e)    => emit_some_expr(e, pp, rc)
+        Expr::OkExpr(e)      => emit_ok_expr(e, pp, rc)
+        Expr::ErrExpr(e)     => emit_err_expr(e, pp, rc)
+        Expr::OldExpr(e)     => emit_expr(box_deref(e), pp, rc)
     }
 }
 
@@ -163,13 +229,13 @@ fn c_ident(s: str) -> str {
     return str_replace(s, "-", "_")
 }
 
-fn emit_binary(b: box<BinExpr>) -> result<str, str> {
+fn emit_binary(b: box<BinExpr>, pp: str, rc: str) -> result<str, str> {
     let be = box_deref(b)
     ## parser.cnd BinExpr has left: Expr (not box<Expr>)
-    let lhs = emit_expr(be.left) must {
+    let lhs = emit_expr(be.left, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
-    let rhs = emit_expr(be.right) must {
+    let rhs = emit_expr(be.right, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     let op = bin_op_c(be.op)
@@ -193,10 +259,10 @@ fn bin_op_c(op: i64) -> str {
     return "??"
 }
 
-fn emit_unary(u: box<UnExpr>) -> result<str, str> {
+fn emit_unary(u: box<UnExpr>, pp: str, rc: str) -> result<str, str> {
     let ue = box_deref(u)
     ## parser.cnd UnExpr has operand: Expr (not box<Expr>)
-    let operand = emit_expr(ue.operand) must {
+    let operand = emit_expr(ue.operand, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     let op = un_op_c(ue.op)
@@ -210,34 +276,176 @@ fn un_op_c(op: i64) -> str {
     return "?"
 }
 
-fn emit_cast(c: box<CastExpr>) -> result<str, str> {
+fn emit_cast(c: box<CastExpr>, pp: str, rc: str) -> result<str, str> {
     let ce = box_deref(c)
     ## parser.cnd CastExpr has operand: Expr (not box<Expr>)
-    let operand = emit_expr(ce.operand) must {
+    let operand = emit_expr(ce.operand, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     let ty = emit_type(ce.target)
     return ok_s(str_concat("((", str_concat(ty, str_concat(")(", str_concat(operand, "))")))))
 }
 
-fn emit_call(c: box<CallExpr>) -> result<str, str> {
+## Extract a bare name from a callee expression (returns "" if not a simple ident).
+fn emit_callee_name(e: Expr) -> str {
+    match e {
+        Expr::Ident(s) => s
+        _              => ""
+    }
+}
+
+fn emit_call(c: box<CallExpr>, pp: str, rc: str) -> result<str, str> {
     let ce = box_deref(c)
-    let callee = emit_expr(ce.callee) must {
+    let n_args = vec_len(ce.args)
+
+    ## ── Builtin special cases ──────────────────────────────────────────────
+    let bname = emit_callee_name(ce.callee)
+
+    ## vec_new() → zero-initialised struct literal {0}
+    if str_eq(bname, "vec_new") {
+        return ok_s("{0}")
+    }
+    ## vec_len(v) → (int64_t)(v)._len
+    if str_eq(bname, "vec_len") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("((int64_t)(", str_concat(a0, ")._len)")))
+    }
+    ## vec_push(v, val) → _cnd_vec_push_MANGLED(&(v), val)  — uses __auto_type to infer element type
+    ## We emit a __extension__ block that resolves the typed push via the vec struct's _data field type.
+    if str_eq(bname, "vec_push") and n_args >= 2 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        let a1 = emit_expr(ce.args[1 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        ## Generic push via statement expression: grows and appends
+        let push_suffix = str_concat(a1, "); }))")
+        return ok_s(str_concat("(__extension__ ({ __typeof__(", str_concat(a0, str_concat(")* _vp = &(", str_concat(a0, str_concat("); if (_vp->_len >= _vp->_cap) { uint64_t _nc = _vp->_cap ? _vp->_cap*2 : 4; _vp->_data = (__typeof__(_vp->_data))realloc(_vp->_data, _nc*sizeof(*_vp->_data)); _vp->_cap = _nc; } _vp->_data[_vp->_len++] = (", push_suffix))))))
+    }
+    ## vec_pop(v) → last element via statement expression
+    if str_eq(bname, "vec_pop") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        let pop_suffix = str_concat(a0, "); assert(_vp->_len > 0); _vp->_data[--_vp->_len]; }))")
+        return ok_s(str_concat("(__extension__ ({ __typeof__(", str_concat(a0, str_concat(")* _vp = &(", pop_suffix))))
+    }
+
+    ## print(s) → printf("%s\n", s)
+    if str_eq(bname, "print") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("printf(\"%s\\n\", ", str_concat(a0, ")")))
+    }
+    ## print_err(s) → fprintf(stderr, "%s\n", s)
+    if str_eq(bname, "print_err") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("fprintf(stderr, \"%s\\n\", ", str_concat(a0, ")")))
+    }
+    ## str_concat(a, b) → _cnd_str_concat(a, b)
+    if str_eq(bname, "str_concat") and n_args >= 2 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        let a1 = emit_expr(ce.args[1 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("_cnd_str_concat(", str_concat(a0, str_concat(", ", str_concat(a1, ")")))))
+    }
+    ## int_to_str(n) → _cnd_int_to_str(n)
+    if str_eq(bname, "int_to_str") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("_cnd_int_to_str(", str_concat(a0, ")")))
+    }
+    ## str_len(s) → (int64_t)strlen(s)
+    if str_eq(bname, "str_len") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("((int64_t)strlen(", str_concat(a0, "))")))
+    }
+    ## str_eq(a, b) → (strcmp(a,b)==0)
+    if str_eq(bname, "str_eq") and n_args >= 2 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        let a1 = emit_expr(ce.args[1 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("(strcmp(", str_concat(a0, str_concat(", ", str_concat(a1, ") == 0)")))))
+    }
+    ## str_find(s, pat, offset) → option<i64> as int64_t*
+    if str_eq(bname, "str_find") and n_args >= 3 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        let a1 = emit_expr(ce.args[1 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        let a2 = emit_expr(ce.args[2 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        let sf_part1 = str_concat("(__extension__ ({ const char* _sf = strstr((", str_concat(a0, str_concat(")+(",  str_concat(a2, str_concat("), ", a1)))))
+        let sf_part2 = str_concat(sf_part1, str_concat(")); if (!_sf) { NULL; } else { int64_t* _rp = (int64_t*)malloc(sizeof(int64_t)); *_rp = (int64_t)(_sf - (", str_concat(a0, "))); _rp; } }))")))
+        return ok_s(sf_part2)
+    }
+    ## str_replace(s, from, to) → _cnd_str_replace
+    if str_eq(bname, "str_replace") and n_args >= 3 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        let a1 = emit_expr(ce.args[1 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        let a2 = emit_expr(ce.args[2 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("_cnd_str_replace(", str_concat(a0, str_concat(", ", str_concat(a1, str_concat(", ", str_concat(a2, ")")))))))
+    }
+    ## str_trim / str_to_upper / str_to_lower → _cnd_* variants
+    if str_eq(bname, "str_trim") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("_cnd_str_trim(", str_concat(a0, ")")))
+    }
+    if str_eq(bname, "str_to_upper") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("_cnd_str_to_upper(", str_concat(a0, ")")))
+    }
+    if str_eq(bname, "str_to_lower") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("_cnd_str_to_lower(", str_concat(a0, ")")))
+    }
+    ## path_join / path_dir / path_filename / path_ext / path_exists
+    if str_eq(bname, "path_join") and n_args >= 2 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        let a1 = emit_expr(ce.args[1 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("_cnd_path_join(", str_concat(a0, str_concat(", ", str_concat(a1, ")")))))
+    }
+    if str_eq(bname, "path_dir") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("_cnd_path_dir(", str_concat(a0, ")")))
+    }
+    if str_eq(bname, "path_exists") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("_cnd_path_exists(", str_concat(a0, ")")))
+    }
+    ## read_file(path) → result<str,str> wrapping
+    if str_eq(bname, "read_file") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("(__extension__ ({ const char* _rf = _cnd_read_file(", str_concat(a0, str_concat("); _rf ? (_CndRes_const_charptr_const_charptr){ ._ok=1, ._ok_val=_rf } : (_CndRes_const_charptr_const_charptr){ ._ok=0, ._err_val=\"read_file failed\" }; }))", ""))))
+    }
+    ## write_file(path, data) → result<unit,str>
+    if str_eq(bname, "write_file") and n_args >= 2 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        let a1 = emit_expr(ce.args[1 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("(__extension__ ({ int _wf = _cnd_write_file(", str_concat(a0, str_concat(", ", str_concat(a1, str_concat("); _wf == 0 ? (_CndRes_void_const_charptr){ ._ok=1 } : (_CndRes_void_const_charptr){ ._ok=0, ._err_val=\"write_file failed\" }; }))", ""))))))
+    }
+    ## os_exit(code)
+    if str_eq(bname, "os_exit") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("exit((int)(", str_concat(a0, "))")))
+    }
+    ## os_args() → build vec<str> from _cnd_argc/_cnd_argv
+    if str_eq(bname, "os_args") {
+        return ok_s("(__extension__ ({ _CndVec_const_charptr _v = {0}; for (int _i = 0; _i < _cnd_argc; _i++) { (__extension__ ({ __typeof__(_v)* _vp = &(_v); if (_vp->_len >= _vp->_cap) { uint64_t _nc = _vp->_cap ? _vp->_cap*2 : 4; _vp->_data = (__typeof__(_vp->_data))realloc(_vp->_data, _nc*sizeof(*_vp->_data)); _vp->_cap = _nc; } _vp->_data[_vp->_len++] = ((const char*)_cnd_argv[_i]); })); } _v; }))")
+    }
+    ## os_getenv(name) → option<str> as const char**
+    if str_eq(bname, "os_getenv") and n_args >= 1 {
+        let a0 = emit_expr(ce.args[0 as u64], pp, rc) must { ok(v) => v  err(e) => return err(e) }
+        return ok_s(str_concat("(__extension__ ({ const char* _eg = getenv(", str_concat(a0, "); const char** _ep = NULL; if (_eg) { _ep = (const char**)malloc(sizeof(const char*)); *_ep = _eg; } _ep; }))")))
+    }
+    ## parse_manifest — delegated to the manifest module function
+    ## (falls through to normal call emission)
+
+    ## ── Default: emit as function call ─────────────────────────────────────
+    let callee = emit_expr(ce.callee, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
-    let args_str = emit_args(ce.args) must {
+    let args_str = emit_args(ce.args, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     return ok_s(str_concat(callee, str_concat("(", str_concat(args_str, ")"))))
 }
 
-fn emit_args(args: vec<Expr>) -> result<str, str> {
+fn emit_args(args: vec<Expr>, pp: str, rc: str) -> result<str, str> {
     let n = vec_len(args)
     let mut s: str = ""
     let mut i: u64 = 0
     loop {
         if i >= n { break }
-        let a = emit_expr(args[i]) must {
+        let a = emit_expr(args[i], pp, rc) must {
             ok(v) => v   err(e) => return err(e)
         }
         if i > 0 { s = str_concat(s, ", ") }
@@ -247,26 +455,35 @@ fn emit_args(args: vec<Expr>) -> result<str, str> {
     return ok_s(s)
 }
 
-fn emit_field(f: box<FieldExpr>) -> result<str, str> {
+fn emit_field(f: box<FieldExpr>, pp: str, rc: str) -> result<str, str> {
     let fe = box_deref(f)
-    let recv = emit_expr(fe.receiver) must {
+    let recv = emit_expr(fe.receiver, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
+    }
+    ## Use -> if receiver is a known pointer param (refmut/ref)
+    match fe.receiver {
+        Expr::Ident(name) => {
+            if is_ptr_param(name, pp) {
+                return ok_s(str_concat(recv, str_concat("->", fe.field)))
+            }
+        }
+        _ => unit
     }
     return ok_s(str_concat(recv, str_concat(".", fe.field)))
 }
 
-fn emit_index(i: box<IndexExpr>) -> result<str, str> {
+fn emit_index(i: box<IndexExpr>, pp: str, rc: str) -> result<str, str> {
     let ie = box_deref(i)
-    let coll = emit_expr(ie.collection) must {
+    let coll = emit_expr(ie.collection, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
-    let idx = emit_expr(ie.index) must {
+    let idx = emit_expr(ie.index, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
-    return ok_s(str_concat(coll, str_concat("[", str_concat(idx, "]"))))
+    return ok_s(str_concat("(", str_concat(coll, str_concat(")._data[", str_concat(idx, "]")))))
 }
 
-fn emit_struct_lit(s: box<StructLitExpr>) -> result<str, str> {
+fn emit_struct_lit(s: box<StructLitExpr>, pp: str, rc: str) -> result<str, str> {
     let se = box_deref(s)
     let mut fields: str = ""
     let n = vec_len(se.fields)
@@ -274,7 +491,7 @@ fn emit_struct_lit(s: box<StructLitExpr>) -> result<str, str> {
     loop {
         if i >= n { break }
         let f = se.fields[i]
-        let fval = emit_expr(f.value) must {
+        let fval = emit_expr(f.value, pp, rc) must {
             ok(v) => v   err(e) => return err(e)
         }
         if i > 0 { fields = str_concat(fields, ", ") }
@@ -284,31 +501,31 @@ fn emit_struct_lit(s: box<StructLitExpr>) -> result<str, str> {
     return ok_s(str_concat("(", str_concat(se.type_name, str_concat("){", str_concat(fields, "}")))))
 }
 
-fn emit_addr_of(e: box<Expr>) -> result<str, str> {
-    let inner = emit_expr(box_deref(e)) must {
+fn emit_addr_of(e: box<Expr>, pp: str, rc: str) -> result<str, str> {
+    let inner = emit_expr(box_deref(e), pp, rc) must {
         ok(v) => v   err(e2) => return err(e2)
     }
     return ok_s(str_concat("(&(", str_concat(inner, "))")))
 }
 
-fn emit_block_expr(b: box<BlkExpr>) -> result<str, str> {
+fn emit_block_expr(b: box<BlkExpr>, pp: str, rc: str) -> result<str, str> {
     let be = box_deref(b)
     let n = vec_len(be.stmts) as i64
     if n == 0 {
         match be.final_expr {
-            some(fe) => return emit_expr(box_deref(fe))
+            some(fe) => return emit_expr(box_deref(fe), pp, rc)
             none     => return ok_s("/* block */0")
         }
     }
     ## Has stmts: emit as GCC statement expression
     let mut buf = emb_new()
     emb_push(refmut(buf), "(__extension__ ({\n")
-    emit_stmts(be.stmts, refmut(buf), 2) must {
+    emit_stmts(be.stmts, refmut(buf), 2, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     match be.final_expr {
         some(fe) => {
-            let fe_s = emit_expr(box_deref(fe)) must {
+            let fe_s = emit_expr(box_deref(fe), pp, rc) must {
                 ok(v) => v   err(e) => return err(e)
             }
             emb_line(refmut(buf), str_concat("        ", str_concat(fe_s, ";")))
@@ -411,34 +628,55 @@ fn binding_name_of(e: Expr) -> str {
 }
 
 ## Emit terminal arm body (return / block-with-return) to string
-fn emit_terminal_body_str(body: Expr) -> result<str, str> {
+fn emit_terminal_body_str(body: Expr, pp: str, rc: str) -> result<str, str> {
     match body {
         Expr::Return(re) => {
-            let inner = emit_expr(box_deref(re)) must {
-                ok(v) => v   err(e) => return err(e)
+            let inner_expr = box_deref(re)
+            ## Handle Unit, OkExpr, ErrExpr specially in return context
+            match inner_expr {
+                Expr::Unit => {
+                    return ok_s("return;")
+                }
+                Expr::OkExpr(v) => {
+                    let iv = emit_expr(box_deref(v), pp, rc) must {
+                        ok(x) => x   err(e2) => return err(e2)
+                    }
+                    return ok_s(str_concat("return (", str_concat(rc, str_concat("){ ._ok=1, ._ok_val=", str_concat(iv, " };")))))
+                }
+                Expr::ErrExpr(v) => {
+                    let iv = emit_expr(box_deref(v), pp, rc) must {
+                        ok(x) => x   err(e2) => return err(e2)
+                    }
+                    return ok_s(str_concat("return (", str_concat(rc, str_concat("){ ._ok=0, ._err_val=", str_concat(iv, " };")))))
+                }
+                _ => {
+                    let inner = emit_expr(inner_expr, pp, rc) must {
+                        ok(v) => v   err(e) => return err(e)
+                    }
+                    return ok_s(str_concat("return ", str_concat(inner, ";")))
+                }
             }
-            return ok_s(str_concat("return ", str_concat(inner, ";")))
         }
         Expr::Block(b) => {
             let blk = box_deref(b)
             let mut buf = emb_new()
-            emit_stmts(blk.stmts, refmut(buf), 3) must {
+            emit_stmts(blk.stmts, refmut(buf), 3, pp, rc) must {
                 ok(v) => v   err(e) => return err(e)
             }
             return ok_s(emb_join(buf))
         }
         _ => {
-            let s = emit_expr(body) must { ok(v) => v   err(e) => return err(e) }
+            let s = emit_expr(body, pp, rc) must { ok(v) => v   err(e) => return err(e) }
             return ok_s(str_concat(s, ";"))
         }
     }
 }
 
 ## Emit one arm as a ternary entry: `cond ? (__extension__({bind; body;})) `
-fn emit_one_ternary_arm(pat: Expr, body: Expr) -> result<str, str> {
+fn emit_one_ternary_arm(pat: Expr, body: Expr, pp: str, rc: str) -> result<str, str> {
     let cond = arm_cond(pat)
     let bind = arm_bindings(pat)
-    let body_s = emit_expr(body) must { ok(v) => v   err(e) => return err(e) }
+    let body_s = emit_expr(body, pp, rc) must { ok(v) => v   err(e) => return err(e) }
     ## wrap in nested statement expression if binding required
     if str_len(bind) > 0 {
         return ok_s(str_concat(cond, str_concat(" ? (__extension__ ({ ", str_concat(bind, str_concat(" ", str_concat(body_s, "; }))"))))))
@@ -447,9 +685,9 @@ fn emit_one_ternary_arm(pat: Expr, body: Expr) -> result<str, str> {
 }
 
 ## ── emit_must_expr ──────────────────────────────────────────────────────────
-fn emit_must_expr(me: box<MustExpr>) -> result<str, str> {
+fn emit_must_expr(me: box<MustExpr>, pp: str, rc: str) -> result<str, str> {
     let m = box_deref(me)
-    let subj = emit_expr(m.subject) must { ok(v) => v   err(e) => return err(e) }
+    let subj = emit_expr(m.subject, pp, rc) must { ok(v) => v   err(e) => return err(e) }
     let narms = vec_len(m.arms) as i64
     let ind1 = "    "
     let ind2 = "        "
@@ -474,7 +712,7 @@ fn emit_must_expr(me: box<MustExpr>) -> result<str, str> {
             if arm_is_terminal(arm.body) {
                 let cond = arm_cond(arm.pattern)
                 let bind = arm_bindings(arm.pattern)
-                let tbody = emit_terminal_body_str(arm.body) must { ok(v) => v   err(e) => return err(e) }
+                let tbody = emit_terminal_body_str(arm.body, pp, rc) must { ok(v) => v   err(e) => return err(e) }
                 out = str_concat(out, str_concat(ind1, str_concat("if (", str_concat(cond, ") {\n"))))
                 if str_len(bind) > 0 {
                     out = str_concat(out, str_concat(ind2, str_concat(bind, "\n")))
@@ -494,7 +732,7 @@ fn emit_must_expr(me: box<MustExpr>) -> result<str, str> {
                 if str_len(bind) > 0 {
                     out = str_concat(out, str_concat(ind1, str_concat(bind, "\n")))
                 }
-                let vbody = emit_expr(arm.body) must { ok(v) => v   err(e) => return err(e) }
+                let vbody = emit_expr(arm.body, pp, rc) must { ok(v) => v   err(e) => return err(e) }
                 out = str_concat(out, str_concat(ind1, str_concat(vbody, ";\n")))
             }
             i = i + 1
@@ -507,7 +745,7 @@ fn emit_must_expr(me: box<MustExpr>) -> result<str, str> {
             if i >= narms { break }
             let arm = m.arms[i as u64]
             if i > 0 { out = str_concat(out, " :\n    ") }
-            let ta = emit_one_ternary_arm(arm.pattern, arm.body) must { ok(v) => v   err(e) => return err(e) }
+            let ta = emit_one_ternary_arm(arm.pattern, arm.body, pp, rc) must { ok(v) => v   err(e) => return err(e) }
             out = str_concat(out, ta)
             i = i + 1
         }
@@ -519,9 +757,9 @@ fn emit_must_expr(me: box<MustExpr>) -> result<str, str> {
 }
 
 ## ── emit_match_expr ──────────────────────────────────────────────────────────
-fn emit_match_expr(me: box<MatchExpr>) -> result<str, str> {
+fn emit_match_expr(me: box<MatchExpr>, pp: str, rc: str) -> result<str, str> {
     let m = box_deref(me)
-    let subj = emit_expr(m.subject) must { ok(v) => v   err(e) => return err(e) }
+    let subj = emit_expr(m.subject, pp, rc) must { ok(v) => v   err(e) => return err(e) }
     let narms = vec_len(m.arms) as i64
     let ind1 = "    "
     let ind2 = "        "
@@ -546,7 +784,7 @@ fn emit_match_expr(me: box<MatchExpr>) -> result<str, str> {
             if arm_is_terminal(arm.body) {
                 let cond = arm_cond(arm.pattern)
                 let bind = arm_bindings(arm.pattern)
-                let tbody = emit_terminal_body_str(arm.body) must { ok(v) => v   err(e) => return err(e) }
+                let tbody = emit_terminal_body_str(arm.body, pp, rc) must { ok(v) => v   err(e) => return err(e) }
                 out = str_concat(out, str_concat(ind1, str_concat("if (", str_concat(cond, ") {\n"))))
                 if str_len(bind) > 0 {
                     out = str_concat(out, str_concat(ind2, str_concat(bind, "\n")))
@@ -565,7 +803,7 @@ fn emit_match_expr(me: box<MatchExpr>) -> result<str, str> {
             if not arm_is_terminal(arm.body) {
                 if not first_val { out = str_concat(out, " :\n    ") }
                 first_val = false
-                let ta = emit_one_ternary_arm(arm.pattern, arm.body) must { ok(v) => v   err(e) => return err(e) }
+                let ta = emit_one_ternary_arm(arm.pattern, arm.body, pp, rc) must { ok(v) => v   err(e) => return err(e) }
                 out = str_concat(out, ta)
             }
             i = i + 1
@@ -579,7 +817,7 @@ fn emit_match_expr(me: box<MatchExpr>) -> result<str, str> {
             if i >= narms { break }
             let arm = m.arms[i as u64]
             if i > 0 { out = str_concat(out, " :\n    ") }
-            let ta = emit_one_ternary_arm(arm.pattern, arm.body) must { ok(v) => v   err(e) => return err(e) }
+            let ta = emit_one_ternary_arm(arm.pattern, arm.body, pp, rc) must { ok(v) => v   err(e) => return err(e) }
             out = str_concat(out, ta)
             i = i + 1
         }
@@ -590,29 +828,29 @@ fn emit_match_expr(me: box<MatchExpr>) -> result<str, str> {
     return ok_s(out)
 }
 
-fn emit_return_expr(e: box<Expr>) -> result<str, str> {
-    let inner = emit_expr(box_deref(e)) must {
+fn emit_return_expr(e: box<Expr>, pp: str, rc: str) -> result<str, str> {
+    let inner = emit_expr(box_deref(e), pp, rc) must {
         ok(v) => v   err(err2) => return err(err2)
     }
     return ok_s(str_concat("/* return */", inner))
 }
 
-fn emit_some_expr(e: box<Expr>) -> result<str, str> {
-    let inner = emit_expr(box_deref(e)) must {
+fn emit_some_expr(e: box<Expr>, pp: str, rc: str) -> result<str, str> {
+    let inner = emit_expr(box_deref(e), pp, rc) must {
         ok(v) => v   err(err2) => return err(err2)
     }
     return ok_s(str_concat("_cnd_some(", str_concat(inner, ")")))
 }
 
-fn emit_ok_expr(e: box<Expr>) -> result<str, str> {
-    let inner = emit_expr(box_deref(e)) must {
+fn emit_ok_expr(e: box<Expr>, pp: str, rc: str) -> result<str, str> {
+    let inner = emit_expr(box_deref(e), pp, rc) must {
         ok(v) => v   err(err2) => return err(err2)
     }
     return ok_s(str_concat("_cnd_ok(", str_concat(inner, ")")))
 }
 
-fn emit_err_expr(e: box<Expr>) -> result<str, str> {
-    let inner = emit_expr(box_deref(e)) must {
+fn emit_err_expr(e: box<Expr>, pp: str, rc: str) -> result<str, str> {
+    let inner = emit_expr(box_deref(e), pp, rc) must {
         ok(v) => v   err(err2) => return err(err2)
     }
     return ok_s(str_concat("_cnd_err(", str_concat(inner, ")")))
@@ -620,12 +858,12 @@ fn emit_err_expr(e: box<Expr>) -> result<str, str> {
 
 ## ── Statement emission ────────────────────────────────────────────────────────
 
-fn emit_stmts(stmts: vec<Stmt>, buf: refmut<EmBuf>, indent: i64) -> result<unit, str> {
+fn emit_stmts(stmts: vec<Stmt>, buf: refmut<EmBuf>, indent: i64, pp: str, rc: str) -> result<unit, str> {
     let n = vec_len(stmts) as i64
     let mut i: i64 = 0
     loop {
         if i >= n { break }
-        emit_stmt(stmts[i as u64], buf, indent) must {
+        emit_stmt(stmts[i as u64], buf, indent, pp, rc) must {
             ok(v) => v   err(e) => return err(e)
         }
         i = i + 1
@@ -633,21 +871,21 @@ fn emit_stmts(stmts: vec<Stmt>, buf: refmut<EmBuf>, indent: i64) -> result<unit,
     return ok_u()
 }
 
-fn emit_stmt(s: Stmt, buf: refmut<EmBuf>, indent: i64) -> result<unit, str> {
+fn emit_stmt(s: Stmt, buf: refmut<EmBuf>, indent: i64, pp: str, rc: str) -> result<unit, str> {
     let ind = em_indent(indent)
     match s {
-        Stmt::LetS(ls)     => emit_let_stmt(box_deref(ls), buf, indent, ind)
-        Stmt::LetTupS(lt)  => emit_let_tup_stmt(box_deref(lt), buf, ind)
-        Stmt::AssignS(as_) => emit_assign_stmt(box_deref(as_), buf, ind)
-        Stmt::IfS(is_)     => emit_if_stmt(box_deref(is_), buf, indent, ind)
-        Stmt::WhileS(ws)   => emit_while_stmt(box_deref(ws), buf, indent, ind)
-        Stmt::LoopS(body)  => emit_loop_stmt(body, buf, indent, ind)
-        Stmt::ForS(fs)     => emit_for_stmt(box_deref(fs), buf, indent, ind)
+        Stmt::LetS(ls)     => emit_let_stmt(box_deref(ls), buf, indent, ind, pp, rc)
+        Stmt::LetTupS(lt)  => emit_let_tup_stmt(box_deref(lt), buf, ind, pp, rc)
+        Stmt::AssignS(as_) => emit_assign_stmt(box_deref(as_), buf, ind, pp, rc)
+        Stmt::IfS(is_)     => emit_if_stmt(box_deref(is_), buf, indent, ind, pp, rc)
+        Stmt::WhileS(ws)   => emit_while_stmt(box_deref(ws), buf, indent, ind, pp, rc)
+        Stmt::LoopS(body)  => emit_loop_stmt(body, buf, indent, ind, pp, rc)
+        Stmt::ForS(fs)     => emit_for_stmt(box_deref(fs), buf, indent, ind, pp, rc)
         Stmt::BreakS       => emit_break_stmt(buf, ind)
         Stmt::ContinueS    => emit_continue_stmt(buf, ind)
-        Stmt::ReturnS(re)  => emit_return_stmt(box_deref(re), buf, ind)
-        Stmt::AssertS(ae)  => emit_assert_stmt(box_deref(ae), buf, ind)
-        Stmt::ExprS(es)    => emit_expr_stmt(box_deref(es), buf, ind)
+        Stmt::ReturnS(re)  => emit_return_stmt(box_deref(re), buf, ind, pp, rc)
+        Stmt::AssertS(ae)  => emit_assert_stmt(box_deref(ae), buf, ind, pp, rc)
+        Stmt::ExprS(es)    => emit_expr_stmt(box_deref(es), buf, ind, pp, rc)
     }
 }
 
@@ -661,20 +899,20 @@ fn emit_continue_stmt(buf: refmut<EmBuf>, ind: str) -> result<unit, str> {
     return ok_u()
 }
 
-fn emit_let_stmt(ls: LetStmt, buf: refmut<EmBuf>, indent: i64, ind: str) -> result<unit, str> {
+fn emit_let_stmt(ls: LetStmt, buf: refmut<EmBuf>, indent: i64, ind: str, pp: str, rc: str) -> result<unit, str> {
     let ctype = match ls.typ {
         some(t) => emit_type(t)
         none    => "auto"
     }
-    let init = emit_expr(ls.init) must {
+    let init = emit_expr(ls.init, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     emb_line(buf, str_concat(ind, str_concat(ctype, str_concat(" ", str_concat(c_ident(ls.name), str_concat(" = ", str_concat(init, ";")))))))
     return ok_u()
 }
 
-fn emit_let_tup_stmt(lt: LetTupStmt, buf: refmut<EmBuf>, ind: str) -> result<unit, str> {
-    let init = emit_expr(lt.init) must {
+fn emit_let_tup_stmt(lt: LetTupStmt, buf: refmut<EmBuf>, ind: str, pp: str, rc: str) -> result<unit, str> {
+    let init = emit_expr(lt.init, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     emb_line(buf, str_concat(ind, str_concat("auto _tup = ", str_concat(init, ";"))))
@@ -689,11 +927,11 @@ fn emit_let_tup_stmt(lt: LetTupStmt, buf: refmut<EmBuf>, ind: str) -> result<uni
     return ok_u()
 }
 
-fn emit_assign_stmt(as_: AssignStmt, buf: refmut<EmBuf>, ind: str) -> result<unit, str> {
-    let tgt = emit_expr(as_.target) must {
+fn emit_assign_stmt(as_: AssignStmt, buf: refmut<EmBuf>, ind: str, pp: str, rc: str) -> result<unit, str> {
+    let tgt = emit_expr(as_.target, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
-    let val = emit_expr(as_.value) must {
+    let val = emit_expr(as_.value, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     let op = assign_op_c(as_.op)
@@ -716,29 +954,29 @@ fn emit_close_brace(buf: refmut<EmBuf>, ind: str) -> result<unit, str> {
     return ok_u()
 }
 
-fn emit_if_stmt(is_: IfStmt, buf: refmut<EmBuf>, indent: i64, ind: str) -> result<unit, str> {
-    let cond = emit_expr(is_.cond) must {
+fn emit_if_stmt(is_: IfStmt, buf: refmut<EmBuf>, indent: i64, ind: str, pp: str, rc: str) -> result<unit, str> {
+    let cond = emit_expr(is_.cond, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     emb_line(buf, str_concat(ind, str_concat("if (", str_concat(cond, ") {"))))
-    emit_stmts(is_.then_, buf, indent + 1) must {
+    emit_stmts(is_.then_, buf, indent + 1, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     match is_.else_ {
-        some(eb) => emit_else_branch(box_deref(eb), buf, indent, ind)
+        some(eb) => emit_else_branch(box_deref(eb), buf, indent, ind, pp, rc)
         none     => emit_close_brace(buf, ind)
     }
 }
 
-fn emit_else_branch(eb: IfOrBlock, buf: refmut<EmBuf>, indent: i64, ind: str) -> result<unit, str> {
+fn emit_else_branch(eb: IfOrBlock, buf: refmut<EmBuf>, indent: i64, ind: str, pp: str, rc: str) -> result<unit, str> {
     match eb {
         IfOrBlock::ElseIf(nested) => {
             emb_push(buf, str_concat(ind, "} else "))
-            emit_if_stmt(box_deref(nested), buf, indent, "")
+            emit_if_stmt(box_deref(nested), buf, indent, "", pp, rc)
         }
         IfOrBlock::ElseBlock(stmts) => {
             emb_line(buf, str_concat(ind, "} else {"))
-            emit_stmts(stmts, buf, indent + 1) must {
+            emit_stmts(stmts, buf, indent + 1, pp, rc) must {
                 ok(v) => v   err(e) => return err(e)
             }
             emb_line(buf, str_concat(ind, "}"))
@@ -747,29 +985,29 @@ fn emit_else_branch(eb: IfOrBlock, buf: refmut<EmBuf>, indent: i64, ind: str) ->
     }
 }
 
-fn emit_while_stmt(ws: WhileStmt, buf: refmut<EmBuf>, indent: i64, ind: str) -> result<unit, str> {
-    let cond = emit_expr(ws.cond) must {
+fn emit_while_stmt(ws: WhileStmt, buf: refmut<EmBuf>, indent: i64, ind: str, pp: str, rc: str) -> result<unit, str> {
+    let cond = emit_expr(ws.cond, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     emb_line(buf, str_concat(ind, str_concat("while (", str_concat(cond, ") {"))))
-    emit_stmts(ws.body, buf, indent + 1) must {
+    emit_stmts(ws.body, buf, indent + 1, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     emb_line(buf, str_concat(ind, "}"))
     return ok_u()
 }
 
-fn emit_loop_stmt(body: vec<Stmt>, buf: refmut<EmBuf>, indent: i64, ind: str) -> result<unit, str> {
+fn emit_loop_stmt(body: vec<Stmt>, buf: refmut<EmBuf>, indent: i64, ind: str, pp: str, rc: str) -> result<unit, str> {
     emb_line(buf, str_concat(ind, "while (1) {"))
-    emit_stmts(body, buf, indent + 1) must {
+    emit_stmts(body, buf, indent + 1, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     emb_line(buf, str_concat(ind, "}"))
     return ok_u()
 }
 
-fn emit_for_stmt(fs: ForStmt, buf: refmut<EmBuf>, indent: i64, ind: str) -> result<unit, str> {
-    let iter = emit_expr(fs.iter) must {
+fn emit_for_stmt(fs: ForStmt, buf: refmut<EmBuf>, indent: i64, ind: str, pp: str, rc: str) -> result<unit, str> {
+    let iter = emit_expr(fs.iter, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     let ind1 = em_indent(indent + 1)
@@ -784,7 +1022,7 @@ fn emit_for_stmt(fs: ForStmt, buf: refmut<EmBuf>, indent: i64, ind: str) -> resu
         some(vn) => emb_line(buf, str_concat(ind2, str_concat("auto ", str_concat(c_ident(vn), " = _cnd_map_val(_iter, _i);"))))
         none     => unit
     }
-    emit_stmts(fs.body, buf, indent + 2) must {
+    emit_stmts(fs.body, buf, indent + 2, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     emb_line(buf, str_concat(ind2, "_i++;"))
@@ -793,28 +1031,342 @@ fn emit_for_stmt(fs: ForStmt, buf: refmut<EmBuf>, indent: i64, ind: str) -> resu
     return ok_u()
 }
 
-fn emit_return_stmt(e: Expr, buf: refmut<EmBuf>, ind: str) -> result<unit, str> {
-    let val = emit_expr(e) must {
-        ok(v) => v   err(err2) => return err(err2)
+fn emit_return_stmt(e: Expr, buf: refmut<EmBuf>, ind: str, pp: str, rc: str) -> result<unit, str> {
+    match e {
+        Expr::Unit => {
+            emb_line(buf, str_concat(ind, "return;"))
+            return ok_u()
+        }
+        Expr::OkExpr(v) => {
+            let inner = emit_expr(box_deref(v), pp, rc) must { ok(x) => x  err(e2) => return err(e2) }
+            emb_line(buf, str_concat(ind, str_concat("return (", str_concat(rc, str_concat("){ ._ok=1, ._ok_val=", str_concat(inner, " };"))))))
+            return ok_u()
+        }
+        Expr::ErrExpr(v) => {
+            let inner = emit_expr(box_deref(v), pp, rc) must { ok(x) => x  err(e2) => return err(e2) }
+            emb_line(buf, str_concat(ind, str_concat("return (", str_concat(rc, str_concat("){ ._ok=0, ._err_val=", str_concat(inner, " };"))))))
+            return ok_u()
+        }
+        _ => {
+            ## If the function returns void (unit), emit bare return; regardless of expression
+            if str_eq(rc, "void") {
+                emb_line(buf, str_concat(ind, "return;"))
+                return ok_u()
+            }
+            let val = emit_expr(e, pp, rc) must {
+                ok(v) => v   err(err2) => return err(err2)
+            }
+            emb_line(buf, str_concat(ind, str_concat("return ", str_concat(val, ";"))))
+            return ok_u()
+        }
     }
-    emb_line(buf, str_concat(ind, str_concat("return ", str_concat(val, ";"))))
-    return ok_u()
 }
 
-fn emit_assert_stmt(ae: AssertStmt, buf: refmut<EmBuf>, ind: str) -> result<unit, str> {
-    let cond = emit_expr(ae.expr) must {
+fn emit_assert_stmt(ae: AssertStmt, buf: refmut<EmBuf>, ind: str, pp: str, rc: str) -> result<unit, str> {
+    let cond = emit_expr(ae.expr, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     emb_line(buf, str_concat(ind, str_concat("_CND_ASSERT(", str_concat(cond, ");"))))
     return ok_u()
 }
 
-fn emit_expr_stmt(es: Expr, buf: refmut<EmBuf>, ind: str) -> result<unit, str> {
-    let e = emit_expr(es) must {
+fn emit_expr_stmt(es: Expr, buf: refmut<EmBuf>, ind: str, pp: str, rc: str) -> result<unit, str> {
+    let e = emit_expr(es, pp, rc) must {
         ok(v) => v   err(e) => return err(e)
     }
     emb_line(buf, str_concat(ind, str_concat(e, ";")))
     return ok_u()
+}
+
+## ── Type-collection pass ──────────────────────────────────────────────────────
+## Collect vec<T> and result<T,E> types from a TypeExpr, returning typedef/struct
+## definition lines (with #ifndef guards for dedup).
+
+## Generate only the vec struct typedef (no push/pop helpers) for one TypeExpr, or "" if not vec<T>.
+## Emits: typedef struct _CndVec_M _CndVec_M; struct _CndVec_M { T* _data; u64 _len; u64 _cap; };
+## This only needs T to be forward-declared so it can go before struct/enum definitions.
+fn type_to_vec_struct_only(te: TypeExpr) -> str {
+    match te {
+        TypeExpr::Generic(g) => {
+            let gt = box_deref(g)
+            if str_eq(gt.name, "vec") and vec_len(gt.args) >= 1 {
+                let elem_c = emit_type(gt.args[0])
+                let mangled = mangle_ctype(elem_c)
+                let sname   = str_concat("_CndVec_", mangled)
+                let guard   = str_concat("_CNDVEC_", mangled)
+                let td = str_concat("typedef struct ", str_concat(sname, str_concat(" ", str_concat(sname, ";"))))
+                let sd = str_concat("struct ", str_concat(sname, str_concat(" { ", str_concat(elem_c, "* _data; uint64_t _len; uint64_t _cap; };"))))
+                return str_concat("#ifndef ", str_concat(guard, str_concat("\n#define ", str_concat(guard, str_concat("\n", str_concat(td, str_concat("\n", str_concat(sd, "\n#endif\n"))))))))
+            }
+            return ""
+        }
+        _ => return ""
+    }
+}
+
+## Generate only the push/pop helpers for one vec<T> TypeExpr, or "" if not vec<T>.
+## Requires T to be a complete type, so must appear after all struct definitions.
+fn type_to_vec_helpers_only(te: TypeExpr) -> str {
+    match te {
+        TypeExpr::Generic(g) => {
+            let gt = box_deref(g)
+            if str_eq(gt.name, "vec") and vec_len(gt.args) >= 1 {
+                let elem_c = emit_type(gt.args[0])
+                let mangled = mangle_ctype(elem_c)
+                let sname   = str_concat("_CndVec_", mangled)
+                let guard   = str_concat("_CNDVEC_HELPERS_", mangled)
+                let push_fn = str_concat("_cnd_vec_push_", mangled)
+                let pop_fn  = str_concat("_cnd_vec_pop_", mangled)
+                let ph1 = str_concat("static inline void ", str_concat(push_fn, str_concat("(", str_concat(sname, str_concat("* v, ", str_concat(elem_c, " val) {"))))))
+                let ph2 = "  if (v->_len >= v->_cap) { uint64_t _nc = v->_cap ? v->_cap*2 : 4;"
+                let ph3 = str_concat("  v->_data = (", str_concat(elem_c, "*)realloc(v->_data, _nc*sizeof("))
+                let ph4 = str_concat(elem_c, ")); v->_cap = _nc; }  v->_data[v->_len++] = val; }")
+                let push = str_concat(ph1, str_concat(ph2, str_concat(ph3, ph4)))
+                let pop = str_concat("static inline ", str_concat(elem_c, str_concat(" ", str_concat(pop_fn, str_concat("(", str_concat(sname, "* v) { assert(v->_len > 0); return v->_data[--v->_len]; }"))))))
+                return str_concat("#ifndef ", str_concat(guard, str_concat("\n#define ", str_concat(guard, str_concat("\n", str_concat(push, str_concat("\n", str_concat(pop, "\n#endif\n"))))))))
+            }
+            return ""
+        }
+        _ => return ""
+    }
+}
+
+## Generate a guarded result struct definition for one TypeExpr, or "" if not result<T,E>.
+fn type_to_res_struct(te: TypeExpr) -> str {
+    match te {
+        TypeExpr::Generic(g) => {
+            let gt = box_deref(g)
+            if str_eq(gt.name, "result") and vec_len(gt.args) >= 2 {
+                let ok_c  = emit_type(gt.args[0])
+                let err_c = emit_type(gt.args[1])
+                let m0 = mangle_ctype(ok_c)
+                let m1 = mangle_ctype(err_c)
+                let tname = str_concat("_CndRes_", str_concat(m0, str_concat("_", m1)))
+                let guard = str_concat("_CNDRES_", str_concat(m0, str_concat("_", m1)))
+                ## Build struct body: always has _ok and _err_val; _ok_val only if ok_c != "void"
+                let mut ok_field = ""
+                if str_eq(ok_c, "void") { ok_field = "" } else { ok_field = str_concat("    ", str_concat(ok_c, " _ok_val;\n")) }
+                let body = str_concat("    int _ok;\n", str_concat(ok_field, str_concat("    ", str_concat(err_c, " _err_val;\n"))))
+                return str_concat("#ifndef ", str_concat(guard, str_concat("\n#define ", str_concat(guard, str_concat("\ntypedef struct { ", str_concat(body, str_concat("} ", str_concat(tname, ";\n#endif\n"))))))))
+            }
+            return ""
+        }
+        _ => return ""
+    }
+}
+
+## Walk a TypeExpr and collect vec struct-only typedefs (no push/pop) for all vec<T> types found.
+fn collect_vec_lines_from_type(te: TypeExpr) -> vec<str> {
+    let mut lines: vec<str> = vec_new()
+    let direct = type_to_vec_struct_only(te)
+    if str_len(direct) > 0 {
+        vec_push(lines, direct)
+    }
+    ## Recurse into generic args
+    match te {
+        TypeExpr::Generic(g) => {
+            let gt = box_deref(g)
+            let argc = vec_len(gt.args) as i64
+            let mut ai: i64 = 0
+            loop {
+                if ai >= argc { break }
+                let sub = collect_vec_lines_from_type(gt.args[ai as u64])
+                let sn = vec_len(sub) as i64
+                let mut si: i64 = 0
+                loop {
+                    if si >= sn { break }
+                    vec_push(lines, sub[si as u64])
+                    si = si + 1
+                }
+                ai = ai + 1
+            }
+        }
+        _ => unit
+    }
+    return lines
+}
+
+## Walk a TypeExpr and collect struct definition lines for all result<T,E> types found.
+fn collect_res_lines_from_type(te: TypeExpr) -> vec<str> {
+    let mut lines: vec<str> = vec_new()
+    let direct = type_to_res_struct(te)
+    if str_len(direct) > 0 {
+        vec_push(lines, direct)
+    }
+    ## Recurse into generic args
+    match te {
+        TypeExpr::Generic(g) => {
+            let gt = box_deref(g)
+            let argc = vec_len(gt.args) as i64
+            let mut ai: i64 = 0
+            loop {
+                if ai >= argc { break }
+                let sub = collect_res_lines_from_type(gt.args[ai as u64])
+                let sn = vec_len(sub) as i64
+                let mut si: i64 = 0
+                loop {
+                    if si >= sn { break }
+                    vec_push(lines, sub[si as u64])
+                    si = si + 1
+                }
+                ai = ai + 1
+            }
+        }
+        _ => unit
+    }
+    return lines
+}
+
+## Append all vec typedef lines from a list of TypeExprs into `out`.
+fn collect_vec_lines_from_types(types: vec<TypeExpr>, out: refmut<EmBuf>) -> unit {
+    let n = vec_len(types) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let lines = collect_vec_lines_from_type(types[i as u64])
+        let ln = vec_len(lines) as i64
+        let mut li: i64 = 0
+        loop {
+            if li >= ln { break }
+            emb_push(out, lines[li as u64])
+            li = li + 1
+        }
+        i = i + 1
+    }
+    return unit
+}
+
+## Append all result struct lines from a list of TypeExprs into `out`.
+fn collect_res_lines_from_types(types: vec<TypeExpr>, out: refmut<EmBuf>) -> unit {
+    let n = vec_len(types) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let lines = collect_res_lines_from_type(types[i as u64])
+        let ln = vec_len(lines) as i64
+        let mut li: i64 = 0
+        loop {
+            if li >= ln { break }
+            emb_push(out, lines[li as u64])
+            li = li + 1
+        }
+        i = i + 1
+    }
+    return unit
+}
+
+## Walk a TypeExpr and collect push/pop helper lines for all vec<T> types found.
+fn collect_vec_helpers_from_type(te: TypeExpr) -> vec<str> {
+    let mut lines: vec<str> = vec_new()
+    let direct = type_to_vec_helpers_only(te)
+    if str_len(direct) > 0 {
+        vec_push(lines, direct)
+    }
+    ## Recurse into generic args
+    match te {
+        TypeExpr::Generic(g) => {
+            let gt = box_deref(g)
+            let argc = vec_len(gt.args) as i64
+            let mut ai: i64 = 0
+            loop {
+                if ai >= argc { break }
+                let sub = collect_vec_helpers_from_type(gt.args[ai as u64])
+                let sn = vec_len(sub) as i64
+                let mut si: i64 = 0
+                loop {
+                    if si >= sn { break }
+                    vec_push(lines, sub[si as u64])
+                    si = si + 1
+                }
+                ai = ai + 1
+            }
+        }
+        _ => unit
+    }
+    return lines
+}
+
+## Append all vec push/pop helper lines from a list of TypeExprs into `out`.
+fn collect_vec_helpers_from_types(types: vec<TypeExpr>, out: refmut<EmBuf>) -> unit {
+    let n = vec_len(types) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let lines = collect_vec_helpers_from_type(types[i as u64])
+        let ln = vec_len(lines) as i64
+        let mut li: i64 = 0
+        loop {
+            if li >= ln { break }
+            emb_push(out, lines[li as u64])
+            li = li + 1
+        }
+        i = i + 1
+    }
+    return unit
+}
+
+struct TypeBuf { types: vec<TypeExpr> }
+
+## Collect all TypeExprs that appear in a Decl (fields, params, return types).
+fn collect_types_from_decl(d: Decl, out: refmut<TypeBuf>) -> unit {
+    match d {
+        Decl::StructD(sd) => {
+            let s = box_deref(sd)
+            let n = vec_len(s.fields) as i64
+            let mut i: i64 = 0
+            loop {
+                if i >= n { break }
+                vec_push(out.types, s.fields[i as u64].typ)
+                i = i + 1
+            }
+        }
+        Decl::FnD(fd) => {
+            let f = box_deref(fd)
+            let n = vec_len(f.params) as i64
+            let mut i: i64 = 0
+            loop {
+                if i >= n { break }
+                vec_push(out.types, f.params[i as u64].typ)
+                i = i + 1
+            }
+            vec_push(out.types, f.ret)
+        }
+        Decl::ExternD(xd) => {
+            let x = box_deref(xd)
+            let n = vec_len(x.params) as i64
+            let mut i: i64 = 0
+            loop {
+                if i >= n { break }
+                vec_push(out.types, x.params[i as u64].typ)
+                i = i + 1
+            }
+            vec_push(out.types, x.ret)
+        }
+        Decl::ImplD(id) => {
+            let im = box_deref(id)
+            let nm = vec_len(im.methods) as i64
+            let mut mi: i64 = 0
+            loop {
+                if mi >= nm { break }
+                let mf = im.methods[mi as u64]
+                let np = vec_len(mf.params) as i64
+                let mut pi: i64 = 0
+                loop {
+                    if pi >= np { break }
+                    vec_push(out.types, mf.params[pi as u64].typ)
+                    pi = pi + 1
+                }
+                vec_push(out.types, mf.ret)
+                mi = mi + 1
+            }
+        }
+        Decl::ConstD(cd) => {
+            let c = box_deref(cd)
+            vec_push(out.types, c.typ)
+        }
+        _ => unit
+    }
+    return unit
 }
 
 ## ── Declaration emission ──────────────────────────────────────────────────────
@@ -838,9 +1390,10 @@ fn emit_fn_decl(f: FnDecl, buf: refmut<EmBuf>) -> result<unit, str> {
     let params = emit_params(f.params) must {
         ok(v) => v   err(e) => return err(e)
     }
+    let pp = collect_ptr_params_str(f.params)
     let sig = str_concat(ret, str_concat(" ", str_concat(c_ident(f.name), str_concat("(", str_concat(params, ")")))))
     emb_line(buf, str_concat(sig, " {"))
-    emit_stmts(f.body, buf, 1) must {
+    emit_stmts(f.body, buf, 1, pp, ret) must {
         ok(v) => v   err(e) => return err(e)
     }
     emb_line(buf, "}")
@@ -890,7 +1443,7 @@ fn emit_enum_decl(ed: EnumDecl, buf: refmut<EmBuf>) -> result<unit, str> {
         emb_line(buf, str_concat("#define _TAG_", str_concat(ed.name, str_concat("_", str_concat(v.name, str_concat(" ", int_to_str(i)))))))
         i = i + 1
     }
-    emb_line(buf, "struct {")
+    emb_line(buf, str_concat("struct _en_", str_concat(ed.name, " {")))
     emb_line(buf, "    int _tag;")
     emb_line(buf, "    union {")
     i = 0
@@ -908,7 +1461,33 @@ fn emit_enum_decl(ed: EnumDecl, buf: refmut<EmBuf>) -> result<unit, str> {
         i = i + 1
     }
     emb_line(buf, "    } _v;")
-    emb_line(buf, str_concat("} ", str_concat(ed.name, ";")))
+    emb_line(buf, "};")
+    ## Emit inline constructor functions: static inline EnumName EnumName__VariantName(T _0) { ... }
+    i = 0
+    loop {
+        if i >= n { break }
+        let v = ed.variants[i as u64]
+        let np = vec_len(v.payload) as i64
+        let fn_name = str_concat(ed.name, str_concat("__", v.name))
+        let tag_const = str_concat("_TAG_", str_concat(ed.name, str_concat("_", v.name)))
+        if np == 0 {
+            ## No-payload variant: static inline EnumName EnumName__VariantName(void)
+            let sig = str_concat("static inline ", str_concat(ed.name, str_concat(" ", str_concat(fn_name, "(void)"))))
+            let body1 = str_concat(sig, " {")
+            let body2 = str_concat("  ", str_concat(ed.name, str_concat(" _r; _r._tag = ", str_concat(tag_const, "; return _r; }"))))
+            emb_line(buf, body1)
+            emb_line(buf, body2)
+        }
+        if np > 0 {
+            let pt = emit_type(v.payload[0 as u64])
+            let sig = str_concat("static inline ", str_concat(ed.name, str_concat(" ", str_concat(fn_name, str_concat("(", str_concat(pt, " _0)"))))))
+            let body1 = str_concat(sig, " {")
+            let body2 = str_concat("  ", str_concat(ed.name, str_concat(" _r; _r._tag = ", str_concat(tag_const, str_concat("; _r._v._v", str_concat(v.name, " = _0; return _r; }"))))))
+            emb_line(buf, body1)
+            emb_line(buf, body2)
+        }
+        i = i + 1
+    }
     emb_line(buf, "")
     return ok_u()
 }
@@ -924,7 +1503,7 @@ fn emit_extern_decl(xd: ExternDecl, buf: refmut<EmBuf>) -> result<unit, str> {
 
 fn emit_const_decl(cd: ConstDecl, buf: refmut<EmBuf>) -> result<unit, str> {
     let ct = emit_type(cd.typ)
-    let val = emit_expr(cd.value) must {
+    let val = emit_expr(cd.value, "", "") must {
         ok(v) => v   err(e) => return err(e)
     }
     emb_line(buf, str_concat("static const ", str_concat(ct, str_concat(" ", str_concat(c_ident(cd.name), str_concat(" = ", str_concat(val, ";")))))))
@@ -947,10 +1526,49 @@ fn emit_impl_decl(id: ImplDecl, buf: refmut<EmBuf>) -> result<unit, str> {
     return ok_u()
 }
 
+## Emit only struct/enum/const decls (pass 3).
+fn emit_decl_struct_enum_const(d: Decl, buf: refmut<EmBuf>) -> result<unit, str> {
+    match d {
+        Decl::StructD(sd)  => emit_struct_decl(box_deref(sd), buf)
+        Decl::EnumD(ed)    => emit_enum_decl(box_deref(ed), buf)
+        Decl::ConstD(cd)   => emit_const_decl(box_deref(cd), buf)
+        _ => ok_u()
+    }
+}
+
+## Emit a forward declaration (prototype) for a fn decl — pass 4.5.
+fn emit_fn_forward_decl(f: FnDecl, buf: refmut<EmBuf>) -> result<unit, str> {
+    let ret = emit_type(f.ret)
+    let params = emit_params(f.params) must {
+        ok(v) => v   err(e) => return err(e)
+    }
+    let sig = str_concat(ret, str_concat(" ", str_concat(c_ident(f.name), str_concat("(", str_concat(params, ");")))))
+    emb_line(buf, sig)
+    return ok_u()
+}
+
+## Emit fn forward declarations only (pass 4.5).
+fn emit_decl_fn_forward(d: Decl, buf: refmut<EmBuf>) -> result<unit, str> {
+    match d {
+        Decl::FnD(fd) => emit_fn_forward_decl(box_deref(fd), buf)
+        _ => ok_u()
+    }
+}
+
+## Emit only fn/extern/impl decls (pass 5).
+fn emit_decl_fn_extern_impl(d: Decl, buf: refmut<EmBuf>) -> result<unit, str> {
+    match d {
+        Decl::FnD(fd)      => emit_fn_decl(box_deref(fd), buf)
+        Decl::ExternD(xd)  => emit_extern_decl(box_deref(xd), buf)
+        Decl::ImplD(id)    => emit_impl_decl(box_deref(id), buf)
+        _ => ok_u()
+    }
+}
+
 ## ── File header ───────────────────────────────────────────────────────────────
 
 fn emit_file_header(buf: refmut<EmBuf>, name: str) -> unit {
-    emb_line(buf, "/* generated by emit_c.cnd (Candor M9.6) */")
+    emb_line(buf, "/* generated by emit_c.cnd (Candor M9.14) */")
     emb_line(buf, str_concat("/* source: ", str_concat(name, " */")))
     emb_line(buf, "#include <stdint.h>")
     emb_line(buf, "#include <stdbool.h>")
@@ -965,12 +1583,19 @@ fn emit_file_header(buf: refmut<EmBuf>, name: str) -> unit {
 ## ── Entry point ───────────────────────────────────────────────────────────────
 
 ## emit_c: compile a ParsedFile to a C source string.
+## Five-pass approach:
+##   Pass 1: forward typedefs (typedef struct X_s X; typedef struct _en_X X;)
+##   Pass 2: vec typedefs (typedef T* _CndVec_T_mangled;) with #ifndef guards
+##   Pass 3: struct/enum/const full definitions
+##   Pass 4: result struct definitions with #ifndef guards
+##   Pass 5: fn/extern/impl declarations
 fn emit_c(pf: ParsedFile) -> result<str, str> {
     let mut buf = emb_new()
     emit_file_header(refmut(buf), pf.name)
 
-    ## First pass: forward-declare structs and enums.
     let n = vec_len(pf.decls) as i64
+
+    ## Pass 1: forward-declare structs and enums.
     let mut i: i64 = 0
     loop {
         if i >= n { break }
@@ -989,11 +1614,74 @@ fn emit_c(pf: ParsedFile) -> result<str, str> {
     }
     emb_line(refmut(buf), "")
 
-    ## Second pass: full declarations.
+    ## Collect all TypeExprs from all decls for type-collection passes.
+    let mut all_types_buf = TypeBuf{ types: vec_new() }
     i = 0
     loop {
         if i >= n { break }
-        emit_decl(pf.decls[i as u64], refmut(buf)) must {
+        collect_types_from_decl(pf.decls[i as u64], refmut(all_types_buf))
+        i = i + 1
+    }
+
+    ## Pass 2: emit vec struct typedefs (struct + typedef only, no push/pop helpers).
+    ## These only require forward declarations, so they can precede enum/struct bodies.
+    collect_vec_lines_from_types(all_types_buf.types, refmut(buf))
+    emb_line(refmut(buf), "")
+
+    ## Pass 3a: emit enum full definitions first (so enum types are complete before structs use them by value).
+    i = 0
+    loop {
+        if i >= n { break }
+        match pf.decls[i as u64] {
+            Decl::EnumD(ed) => emit_enum_decl(box_deref(ed), refmut(buf)) must {
+                ok(v) => v   err(e) => return err(e)
+            }
+            _ => unit
+        }
+        i = i + 1
+    }
+
+    ## Pass 3b: emit struct and const definitions (enums already complete above).
+    i = 0
+    loop {
+        if i >= n { break }
+        match pf.decls[i as u64] {
+            Decl::StructD(sd) => emit_struct_decl(box_deref(sd), refmut(buf)) must {
+                ok(v) => v   err(e) => return err(e)
+            }
+            Decl::ConstD(cd) => emit_const_decl(box_deref(cd), refmut(buf)) must {
+                ok(v) => v   err(e) => return err(e)
+            }
+            _ => unit
+        }
+        i = i + 1
+    }
+
+    ## Pass 3c: emit vec push/pop helpers AFTER all struct defs (T must be complete for by-value ops).
+    collect_vec_helpers_from_types(all_types_buf.types, refmut(buf))
+    emb_line(refmut(buf), "")
+
+    ## Pass 4: emit result struct definitions (guarded with #ifndef).
+    collect_res_lines_from_types(all_types_buf.types, refmut(buf))
+    emb_line(refmut(buf), "")
+
+    ## Pass 4.5: emit function forward declarations (prototypes) so mutually recursive
+    ## functions can call each other before their bodies appear.
+    i = 0
+    loop {
+        if i >= n { break }
+        emit_decl_fn_forward(pf.decls[i as u64], refmut(buf)) must {
+            ok(v) => v   err(e) => return err(e)
+        }
+        i = i + 1
+    }
+    emb_line(refmut(buf), "")
+
+    ## Pass 5: emit fn/extern/impl declarations.
+    i = 0
+    loop {
+        if i >= n { break }
+        emit_decl_fn_extern_impl(pf.decls[i as u64], refmut(buf)) must {
             ok(v) => v   err(e) => return err(e)
         }
         i = i + 1
