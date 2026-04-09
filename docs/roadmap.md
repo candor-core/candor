@@ -59,6 +59,9 @@ The next goal is Stage 2: `candorc-stage1` compiling itself.
 | **M8.3** | `candorc doc --html` documentation generator: `///` doc-comment syntax recognised by lexer (consumed, no token emitted); `compiler/doc` package with `ExtractDocComments` (raw source pre-pass) and `GenHTML` (self-contained HTML with fn cards, struct/enum sections, effects tags, contract badges); 9 doc package tests pass |
 | **M7.3** | `cap<T>` capability tokens: `cap Name` declaration introduces a named capability; `cap<Name>` is a zero-size proof type; `cap(X)` function annotation enforced at call sites — caller must have `cap(X)` annotation or `cap<X>` in scope; C backend emits `typedef uint8_t cap_Name`; 6 typeck tests pass |
 | **M10.1** | `task<T>` / `spawn` structured concurrency: `spawn { return expr }` starts a pthread and returns `task<T>`; `.join()` blocks and returns `result<T, str>`; per-spawn context struct heap-allocated and passed to `pthread_create`; `_CndTask_T` struct with thread handle + result storage; `#include <pthread.h>` emitted when spawns present; 7 typeck tests + 4 emit_c tests pass |
+| **M9.14–9.15** | match/must emission fixes, PathBind segfault fix in Go compiler | 2026-04-02 |
+| **M9.16–9.17** | emit_c.cnd: scope tracking, box builtins, forward decls, index, vec ordering, match/must fixes | 2026-04-04 |
+| **M9.18** | **Stage 2 self-hosting**: `stage3.exe` (GCC-compiled from Candor-emitted C) successfully compiles all 6 Candor compiler source files — exits 0, 11,616 lines. Three root-cause fixes in `emit_c.cnd`: (1) `arm_is_terminal_blk` over-firing on side-effect blocks causing double-push in merge_files; (2) `emit_block_expr` discarding implicit tail ExprS as void; (3) `arm_is_terminal` recursion into Match/Must expressions. | 2026-04-08 |
 
 ### Known language gaps (not yet wired)
 - Named-return / early-exit in closures

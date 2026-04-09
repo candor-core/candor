@@ -1,5 +1,5 @@
 # Known Compiler Bugs Catalog
-**Last updated: 2026-04-08 09:02 MDT**
+**Last updated: 2026-04-08 21:50 MDT**
 
 When GCC throws something strange, check here before debugging from scratch.
 
@@ -88,37 +88,56 @@ Check `str_substr(e_str, e_len - vs_len, vs_len)` against `"((void)0);\n}))"`. I
 
 ---
 
-## Bug 7 — stage3.exe segfault in collect_types_from_decl / collect_params_or
+## Bug 7 — stage3.exe segfault: corrupted Decl tags in merged ParsedFile
 **First observed: 2026-04-08 ~09:01 MDT**  
-**Status: Open — tracked in TASK-09**
+**Fixed: 2026-04-08 ~21:30 MDT**
 
 **Symptoms:**
 ```
 /d/tmp/stage3.exe src/compiler/lexer.cnd ... → Segmentation fault (exit 139)
+GDB: collect_types_from_decl — im.methods._data = 0x1 (invalid pointer)
+     d._tag = 6 (ImplD) for a decl whose pointer is actually an FnDecl ("is_alpha")
+     Pattern: alternating tags 0,6,0,6,... across the merged decls vec
 ```
 
-**GDB backtrace:**
-```
-#0  strlen() — b=0xe (invalid pointer) in _cnd_str_concat
-#1  empty_params_with_err(prefix="fn is_alpha: ", e=0xe)
-#2  collect_params_or(...)
-#3  fill_fn(fd=fn "is_alpha")
-#4  pass2_decl / collect_signatures
-#5  typecheck
-#6  main
-```
+**Root cause — `arm_is_terminal_blk` was too permissive:**
+`arm_is_terminal_blk` in `emit_c.cnd` returned `true` for ANY `BlkExpr` with `final_expr=none`. This includes blocks ending in side-effect statements like `vec_push(decls, d)`.
 
-**Root cause hypothesis:** `collect_params_or` in `typeck.cnd` returns `vec<ParamSig>` via a tail `must` expression. The `emit_fn_body` void-suffix check incorrectly classifies this as void (Bug 4) and emits `(void)(expr)` instead of `return expr`. The function returns garbage from the stack, and the `_err_val` field contains `0xe` — which is then passed to `_cnd_str_concat` as a string.
+In `merge_files` in `main.cnd`, the FnD/StructD/EnumD match arms are blocks with no final expression — they do work (`vec_push`) and produce no value. With the permissive check, `emit_match_expr` classified them as terminal and emitted them as `if` blocks. But the unconditional ternary fallthrough (the ImplD default arm) still executed unconditionally after every arm, pushing each decl twice — once as FnD and once as ImplD.
 
-**Candor source to investigate (`src/compiler/typeck.cnd`):**
-```candor
-fn collect_params_or(params: vec<Param>, prefix: str, env: refmut<TypeEnv>) -> vec<ParamSig> {
-    collect_params(params, env) must {
-        ok(ps) => ps
-        err(e) => empty_params_with_err(prefix, e, env)
-    }
-}
+**Fix (`src/compiler/emit_c.cnd` — `arm_is_terminal_blk`):**
+A block is terminal only if its last statement is `ReturnS`, `BreakS`, `ContinueS`, or an `ExprS` whose expression is itself terminal (recursing through `arm_is_terminal`). Added helpers `match_all_arms_terminal(arms: vec<MatchArm>)` and `must_all_arms_terminal(arms: vec<MustArm>)`, and extended `arm_is_terminal` to recurse into `Expr::Match` and `Expr::Must`.
+
+---
+
+## Bug 8 — `emit_block_expr` discarded implicit tail expressions as void stmts
+**First observed: 2026-04-08 ~21:00 MDT**  
+**Fixed: 2026-04-08 ~21:30 MDT**
+
+**Symptoms:**
 ```
-Both arms return a value (`ps` and `empty_params_with_err(...)` both produce `vec<ParamSig>`). Neither is terminal. The must expression should NOT end with the void suffix — check why `emit_must_expr` is producing `((void)0);\n}))` here.
+D:/tmp/stage2.c:6956:28: error: void value not ignored as it ought to be
+```
+5 functions (`fill_variant_payload`, `fill_struct_field`, `arm_bindings_enum`, etc.) had `return (void_stmt_expr)` at the C level.
 
-**File to edit:** `src/compiler/emit_c.cnd` — `emit_must_expr` and/or `emit_fn_body`
+**Root cause:**
+`emit_block_expr` only used `final_expr` (the explicit trailing expression) as the block value. But the Candor parser always sets `final_expr=none` — every expression in a block body is stored as `Stmt::ExprS`. The last `ExprS` in a block IS the implicit return value, but `emit_block_expr` was emitting it as `(void)(expr)` like any other statement.
+
+Example arm body: `{ env_error(env, msg);  ty_unknown() }` — parsed as two `ExprS` stmts, `final_expr=none`. `ty_unknown()` was emitted `(void)(ty_unknown())`, making the block void-typed.
+
+**Fix (`src/compiler/emit_c.cnd` — `emit_block_expr`):**
+When `final_expr=none`, peel the last stmt if it is an `ExprS` and treat it as the block's value expression. Emit stmts `0..n-2` as statements; emit the peeled ExprS as the trailing value inside the `__extension__` stmt-expr.
+
+---
+
+## Bug 9 — Remaining void-suffix divergence in stage4.c (1 GCC error)
+**First observed: 2026-04-08 ~21:45 MDT**  
+**Status: Open — TASK-10**
+
+**Symptoms:**
+stage4.c (emitted by stage3.exe) has ~150 lines where `return (__extension__({...}))` in stage2.c becomes `(void)((__extension__({...})))`, giving 1 GCC error on `emit_count` initialization.
+
+**Root cause:**
+`emit_fn_body` uses a brittle string-suffix check (`ends with "((void)0);\n}))"`) to decide whether to emit `return expr` or `(void)(expr)`. This check fires on the new `emit_block_expr` function's initialization of `emit_count`, whose initializer is a match expression that stage3.exe still marks as void-suffix-terminated (the none arm block ends in a nested match whose inner block ends in ExprS — the recursion doesn't propagate the non-void signal back through the suffix string by the time `emit_fn_body` checks it).
+
+**The permanent fix:** Replace the suffix-string heuristic in `emit_fn_body` with a proper AST-level `arm_is_terminal` call before emitting. The suffix check was a workaround for not having access to the AST at that point — but the AST is available via the `Expr` node passed to `emit_expr`. Track as TASK-10.

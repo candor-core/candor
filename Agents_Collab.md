@@ -1,7 +1,7 @@
 # Agents_Collab.md
 ## Multi-Agent Coordination — Claude + Gemini
 ### Scott resolves conflicts, sets priority, owns `> Scott:` blocks
-**Last updated: 2026-04-08 09:02 MDT**
+**Last updated: 2026-04-08 22:00 MDT**
 
 > **How this file works:** Open tasks have a status, owner, and timestamp to the minute. Either agent adds a `> Remark:` block. Scott resolves via `> Scott:` block. Completed items move to the Done table at the bottom.
 
@@ -21,18 +21,24 @@
 
 ---
 
-## Bootstrap Pipeline State (2026-04-08 09:02 MDT)
+## Bootstrap Pipeline State (2026-04-08 22:00 MDT)
 
 ```
 src/compiler/*.cnd
   → ./candorc-stage1-rebuilt.exe [.cnd files]   (Go-compiled binary)
-  → src/compiler/lexer.exe                       (Candor-compiled binary, current name)
+  → src/compiler/lexer.exe                       (Candor-compiled binary)
 
-./src/compiler/lexer.exe [.cnd files] > /d/tmp/stage2.c
-  → PATH="/c/msys64/mingw64/bin:$PATH" gcc.exe -std=gnu23 -O0 \
-      -o /d/tmp/stage3.exe /d/tmp/stage2.c -I src/compiler -lm   ← 0 errors ✅
-  → /d/tmp/stage3.exe [.cnd files] > /d/tmp/stage4.c             ← SEGFAULTS ❌ (TASK-09)
+./src/compiler/lexer.exe [.cnd files] > /d/tmp/stage2.c   (11,616 lines)
+  → gcc -std=gnu23 -O0 -o /d/tmp/stage3.exe stage2.c      ← 0 errors ✅
+  → /d/tmp/stage3.exe [.cnd files] > /d/tmp/stage4.c      ← EXIT 0, 11,616 lines ✅ ← M9.18 ACHIEVED
+
+./stage4.c → gcc -std=gnu23 → stage4.exe                  ← 1 GCC error ❌ (TASK-10)
+diff stage2.c stage4.c                                     ← ~150 line diff, void-suffix pattern
 ```
+
+**MILESTONE M9.18 ACHIEVED 2026-04-08:** `stage3.exe` successfully compiles the full Candor compiler source and exits 0. Stage 2 self-hosting is working.
+
+**Remaining gap (TASK-10):** stage4.c has 1 GCC error — `emit_count` initialized from void expression. Root cause: `emit_fn_body` void-suffix string check fires incorrectly on a match initializer. Fix: replace suffix-string heuristic with AST-level terminal check.
 
 **Source file order (always this order):**
 ```
@@ -47,45 +53,39 @@ src/compiler/lexer.cnd  parser.cnd  typeck.cnd  emit_c.cnd  manifest.cnd  main.c
 
 ---
 
-### TASK-09 — stage3.exe segfault in collect_params_or
+### TASK-09 — stage3.exe segfault — CLOSED ✅
 **Opened: 2026-04-08 09:01 MDT**  
+**Closed: 2026-04-08 22:00 MDT**  
+**Root cause documented:** `known_compiler_bugs.md` Bugs 7 and 8.
+
+Two bugs fixed in `src/compiler/emit_c.cnd`:
+1. `arm_is_terminal_blk` returned `true` for any no-final-expr block → merge_files pushed every decl twice → corrupted tag alternation (0,6,0,6...)
+2. `emit_block_expr` didn't extract implicit tail ExprS → Candor `{ side_effect(); value }` blocks emitted as void
+
+Result: `stage3.exe` runs, exits 0, produces 11,616 lines. **M9.18 achieved.**
+
+---
+
+### TASK-10 — stage4.c: 1 GCC error, void-suffix divergence
+**Opened: 2026-04-08 22:00 MDT**  
 **Owner:** Unassigned  
 **Status:** Open
 
-**Symptom (2026-04-08 09:01 MDT):**
+**Symptom:**
 ```
-/d/tmp/stage3.exe src/compiler/lexer.cnd ... → Segmentation fault (exit 139)
+D:/tmp/stage4_compile.c:9059:28: error: void value not ignored as it ought to be
+int64_t emit_count = (void)(...)   ← emit_count gets a void initializer
 ```
+stage4.c also has ~150 lines where `return (ext_stmt)` becomes `(void)(ext_stmt)` vs stage2.c.
 
-**GDB backtrace (2026-04-08 09:01 MDT):**
-```
-#0  strlen() — b=0xe (invalid pointer) in _cnd_str_concat
-#1  empty_params_with_err(prefix="fn is_alpha: ", e=0xe)
-#2  collect_params_or(params, prefix, env)
-#3  fill_fn(fd = fn "is_alpha" from lexer.cnd)
-#4  pass2_decl / collect_signatures / typecheck / main
-```
+**Root cause:**
+`emit_fn_body` uses a string-suffix check `ends with "((void)0);\n}))"` to decide `return` vs `(void)`. For the new `emit_block_expr` function's `emit_count` initializer (a match expression), stage3.exe still produces a void-suffix terminal pattern on the outer match even though it's a value expression. The suffix check can't see the AST — it checks the emitted string.
 
-**Root cause hypothesis (2026-04-08 09:01 MDT):**
-`collect_params_or` in `typeck.cnd` has a tail `must` expression returning `vec<ParamSig>`. Both arms are value-returning (not terminal). But `emit_must_expr` or `emit_fn_body` is incorrectly emitting `(void)(expr)` instead of `return expr` — so the function returns garbage, and the caller reads `0xe` as the `_err_val` string pointer.
+**Fix:** Replace the string-suffix heuristic in `emit_fn_body` with an AST-level terminal check. Before calling `emit_expr(e_node, pp, rc)`, check `arm_is_terminal(e_node)` to decide `return` vs `(void)`. This removes the string-suffix check entirely.
 
-**Candor source (`src/compiler/typeck.cnd`):**
-```candor
-fn collect_params_or(params: vec<Param>, prefix: str, env: refmut<TypeEnv>) -> vec<ParamSig> {
-    collect_params(params, env) must {
-        ok(ps) => ps
-        err(e) => empty_params_with_err(prefix, e, env)
-    }
-}
-```
+**Impact when fixed:** stage4.c will be byte-for-byte identical to stage2.c (full idempotency). That proves the bootstrap is complete.
 
-**Where to look:** `src/compiler/emit_c.cnd` — `emit_must_expr` and `emit_fn_body`. The void suffix check (`((void)0);\n}))`) in `emit_fn_body` may be firing incorrectly on this must expression even though both arms return values.
-
-> Claude (2026-04-08 09:01 MDT): The same pattern in the Go-emitted C (`out_go_emit.c`) has identical `(void)(...)` wrapping — confirmed it's an emission logic bug, not a runtime data issue. The must block here should produce a non-void value since both arms are value arms.
-
-> Gemini: 
-
-> Scott: 
+> Claude (2026-04-08 22:00 MDT): This is a single focused fix — `emit_fn_body` around line 1153 in emit_c.cnd. The check `is_void = str_substr(e_str, ...)` should become `is_void = arm_is_terminal(e_node)` or similar. Should close in under 10 tool calls if docs are read first.
 
 ---
 
@@ -143,3 +143,5 @@ The map macros (`_cnd_map_insert`, `_cnd_map_get`, `_cnd_map_contains`) and `_Cn
 | TASK-06 (map work) | Map typedef/struct emission, _cnd_map_* macros, 0 GCC errors on stage2.c | 2026-04-08 08:51 MDT |
 | TASK-07 | Test scripts updated to use working gcc path | 2026-04-07 ~19:00 MDT |
 | TASK-08 | emit_fn_body implicit tail return + void suffix detection | 2026-04-08 08:58 MDT |
+| TASK-09 | stage3.exe segfault — arm_is_terminal_blk + emit_block_expr implicit tail | 2026-04-08 22:00 MDT |
+| **M9.18** | **Stage 2 self-hosting: stage3.exe exits 0, 11,616 lines** | **2026-04-08 22:00 MDT** |

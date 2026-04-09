@@ -658,15 +658,41 @@ fn emit_block_expr(b: box<BlkExpr>, pp: str, rc: str) -> result<str, str> {
             none     => return ok_s("/* block */0")
         }
     }
-    ## Has stmts: emit as GCC statement expression
+    ## Has stmts: emit as GCC statement expression.
+    ## If no explicit final_expr, check if last stmt is a bare ExprS —
+    ## treat it as the block value (Candor implicit final expression).
+    let mut tail_expr: option<Expr> = none
+    let emit_count: i64 = match be.final_expr {
+        some(_) => n
+        none    => {
+            let last = be.stmts[(n - 1) as u64]
+            match stmt_to_expr(last) {
+                some(e) => {
+                    tail_expr = some(e)
+                    n - 1
+                }
+                none => n
+            }
+        }
+    }
     let mut buf = emb_new()
     emb_push(refmut(buf), "(__extension__ ({\n")
-    emit_stmts(be.stmts, refmut(buf), 2, pp, rc) must {
-        ok(v) => v   err(e) => return err(e)
+    let mut si: i64 = 0
+    loop {
+        if si >= emit_count { break }
+        emit_stmt(be.stmts[si as u64], refmut(buf), 2, pp, rc) must {
+            ok(v) => v   err(e) => return err(e)
+        }
+        si = si + 1
     }
-    match be.final_expr {
-        some(fe) => {
-            let fe_s = emit_expr(box_deref(fe), pp, rc) must {
+    ## Emit the value expression (explicit final_expr OR implicit last ExprS)
+    let value_expr: option<Expr> = match be.final_expr {
+        some(fe) => some(box_deref(fe))
+        none     => tail_expr
+    }
+    match value_expr {
+        some(ve) => {
+            let fe_s = emit_expr(ve, pp, rc) must {
                 ok(v) => v   err(e) => return err(e)
             }
             emb_line(refmut(buf), str_concat("        ", str_concat(fe_s, ";")))
@@ -682,10 +708,12 @@ fn emit_block_expr(b: box<BlkExpr>, pp: str, rc: str) -> result<str, str> {
 ## Is this arm body a terminal (always returns, never yields a value)?
 fn arm_is_terminal(body: Expr) -> bool {
     match body {
-        Expr::Return(_)   => true
-        Expr::Break       => true
-        Expr::Continue    => true
-        Expr::Block(b)    => arm_is_terminal_blk(b)
+        Expr::Return(_)    => true
+        Expr::Break        => true
+        Expr::Continue     => true
+        Expr::Block(b)     => arm_is_terminal_blk(b)
+        Expr::Match(me)    => match_all_arms_terminal(box_deref(me).arms)
+        Expr::Must(me)     => must_all_arms_terminal(box_deref(me).arms)
         _ => false
     }
 }
@@ -693,9 +721,42 @@ fn arm_is_terminal(body: Expr) -> bool {
 fn arm_is_terminal_blk(b: box<BlkExpr>) -> bool {
     let blk = box_deref(b)
     match blk.final_expr {
-        none    => true
         some(_) => false
+        none    => {
+            let n = vec_len(blk.stmts) as i64
+            if n == 0 { return false }
+            let last = blk.stmts[(n - 1) as u64]
+            match last {
+                Stmt::ReturnS(_) => true
+                Stmt::BreakS     => true
+                Stmt::ContinueS  => true
+                Stmt::ExprS(es)  => arm_is_terminal(box_deref(es))
+                _                => false
+            }
+        }
     }
+}
+
+fn match_all_arms_terminal(arms: vec<MatchArm>) -> bool {
+    let n = vec_len(arms) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        if not arm_is_terminal(arms[i as u64].body) { return false }
+        i = i + 1
+    }
+    return true
+}
+
+fn must_all_arms_terminal(arms: vec<MustArm>) -> bool {
+    let n = vec_len(arms) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        if not arm_is_terminal(arms[i as u64].body) { return false }
+        i = i + 1
+    }
+    return true
 }
 
 ## C condition expression for a pattern

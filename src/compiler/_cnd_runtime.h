@@ -230,7 +230,6 @@ static int _cnd_path_exists(const char* p) {
     return access(p, F_OK) == 0;
 #endif
 }
-/* result<i64, str> for os_exec */
 typedef struct { int _ok; int64_t _ok_val; const char* _err_val; } _CndRes_int64_t_const_charptr;
 static inline uint64_t _cnd_map_hash_str(const char* k) {
     uint64_t h = 5381; while (*k) h = ((h<<5)+h)^(unsigned char)*k++; return h;
