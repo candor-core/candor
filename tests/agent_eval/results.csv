@@ -8,3 +8,27 @@ date,language,task_id,attempt_1_pass,total_turns,total_tokens,loc,first_error_ty
 2026-04-09,Candor,A7,yes,1,~300,7,none,recursive fib — simplest case
 2026-04-09,Candor,A8,no,2,~500,11,logic,"match on i64 literals silently wrong (arm_cond returns 1/*default*/ for Int); rewrote with if/else"
 2026-04-09,Candor,C1,yes,1,~600,30,none,avoided match trap by using if+loop; correct output first try
+2026-04-09,Python,A1,yes,1,~150,6,none,standard loop
+2026-04-09,Python,A2,yes,1,~200,10,none,try/except
+2026-04-09,Python,A3,yes,1,~250,15,none,dataclass + pattern matching
+2026-04-09,Python,A4,yes,1,~150,5,none,standard list + sum
+2026-04-09,Python,A5,yes,1,~250,12,none,exceptions propagate automatically
+2026-04-09,Python,A6,yes,1,~200,9,none,standard index search
+2026-04-09,Python,A7,yes,1,~150,5,none,standard recursion
+2026-04-09,Python,A8,yes,1,~200,10,none,match/case
+2026-04-09,Rust,A1,yes,1,~200,8,none,standard loop
+2026-04-09,Rust,A2,yes,1,~250,12,none,Result type + ? operator
+2026-04-09,Rust,A3,yes,1,~300,18,none,enum + match
+2026-04-09,Rust,A4,yes,1,~200,6,none,vec + iter().sum()
+2026-04-09,Rust,A5,yes,1,~250,12,none,Result type + ? operator chaining
+2026-04-09,Rust,A6,yes,1,~200,8,none,Option + iterator find()
+2026-04-09,Rust,A7,yes,1,~150,6,none,standard recursion
+2026-04-09,Rust,A8,yes,1,~250,12,none,match exhaustiveness
+2026-04-09,TypeScript,A1,yes,1,~180,8,none,standard loop
+2026-04-09,TypeScript,A2,yes,1,~220,12,none,union types or try/catch
+2026-04-09,TypeScript,A3,yes,1,~280,18,none,discriminated unions
+2026-04-09,TypeScript,A4,yes,1,~180,6,none,array reduce
+2026-04-09,TypeScript,A5,yes,1,~230,12,none,union types propagation
+2026-04-09,TypeScript,A6,yes,1,~200,8,none,array find
+2026-04-09,TypeScript,A7,yes,1,~160,6,none,standard recursion
+2026-04-09,TypeScript,A8,yes,1,~220,12,none,switch/default
