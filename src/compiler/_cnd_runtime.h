@@ -240,6 +240,9 @@ static double _cnd_str_to_f64(const char* s) { return strtod(s, NULL); }
 #ifndef _CNDVEC_int64_t
 #define _CNDVEC_int64_t
 typedef struct _CndVec_int64_t { int64_t* _data; uint64_t _len; uint64_t _cap; } _CndVec_int64_t;
+#endif
+#ifndef _CNDVEC_HELPERS_int64_t
+#define _CNDVEC_HELPERS_int64_t
 static inline void _cnd_vec_push_int64_t(_CndVec_int64_t* v, int64_t val) {
     if (v->_len >= v->_cap) { uint64_t _nc = v->_cap ? v->_cap*2 : 4;
         v->_data = (int64_t*)realloc(v->_data, _nc*sizeof(int64_t)); v->_cap = _nc; }
