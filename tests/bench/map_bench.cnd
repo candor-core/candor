@@ -1,0 +1,39 @@
+fn map_test() -> i64 {
+    let mut m: map<str, i64> = map_new()
+    let mut i: i64 = 0
+    let max_iter: i64 = 100000
+    
+    loop {
+        if i >= max_iter { break }
+        let k = _cnd_int_to_str(i)
+        map_insert(refmut(m), k, i * 2)
+        i = i + 1
+    }
+    
+    let mut sum: i64 = 0
+    let mut j: i64 = 0
+    loop {
+        if j >= max_iter { break }
+        let k = _cnd_int_to_str(j)
+        let v_opt = map_get(m, k)
+        match v_opt {
+            some(val) => { sum = sum + val }
+            none => { }
+        }
+        j = j + 1
+    }
+    return sum
+}
+
+fn main() -> unit {
+    let start = time_now_ms()
+    let sum = map_test()
+    let end = time_now_ms()
+    let diff = end - start
+    print("map_test sum: ")
+    println(_cnd_int_to_str(sum))
+    print("Time: ")
+    print(_cnd_int_to_str(diff))
+    println("ms")
+    return unit
+}

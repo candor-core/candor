@@ -1,0 +1,43 @@
+struct Point {
+    x: i64
+    y: i64
+    z: i64
+}
+
+fn update_point(p: Point) -> Point {
+    return Point { x: p.x + 1, y: p.y + 2, z: p.z + 3 }
+}
+
+fn struct_test() -> i64 {
+    let mut v: vec<Point> = vec_new()
+    let mut i: i64 = 0
+    let max_iter: i64 = 5000000
+    
+    loop {
+        if i >= max_iter { break }
+        vec_push(refmut(v), Point { x: i, y: i, z: i })
+        i = i + 1
+    }
+    
+    let mut j: i64 = 0
+    loop {
+        if j >= max_iter { break }
+        v[j as u64] = update_point(v[j as u64])
+        v[j as u64] = update_point(v[j as u64])
+        j = j + 1
+    }
+    return v[0 as u64].x
+}
+
+fn main() -> unit {
+    let start = time_now_ms()
+    let sum = struct_test()
+    let end = time_now_ms()
+    let diff = end - start
+    print("struct_test val: ")
+    println(_cnd_int_to_str(sum))
+    print("Time: ")
+    print(_cnd_int_to_str(diff))
+    println("ms")
+    return unit
+}

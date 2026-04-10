@@ -97,9 +97,13 @@ bench_pair() {
 
 FIB_EXE=$(compile_bench fib)
 SIEVE_EXE=$(compile_bench sieve)
+MAP_EXE=$(compile_bench map_bench)
+STRUCT_EXE=$(compile_bench struct_bench)
 
 bench_pair "fib(40) recursive" "$FIB_EXE" "$BENCH/fib.py"
 bench_pair "sieve(1,000,000)" "$SIEVE_EXE" "$BENCH/sieve.py"
+bench_pair "map_insert(100,000) string keys" "$MAP_EXE" "$BENCH/map_bench.py"
+bench_pair "struct pass-by-value (10M)" "$STRUCT_EXE" "$BENCH/struct_bench.py"
 
 echo ""
 echo "======================================"
