@@ -40,6 +40,11 @@ This makes Candor unusually well-suited to the way software is being built today
 
 By minimizing ambiguity, we also minimize **Token Overhead**. Candor allows AI agents to operate more **fiscally and energy efficiently**, reducing operational costs for remote APIs and lowering CPU/GPU utilization for local models.
 
+### The Human Intention Programming (HIP) Platform
+
+Candor is not just a language; it is designed to be a **Cognitive Platform**. The ultimate goal of Candor is to bridge the gap between *Human Intent* and *Machine Execution*. Using our native "Intent Remark" structure currently in specification, Candor forces AI agents to adhere strictly to human-authored architectural boundaries (via implicit capabilities and `effects`), while the compiler mathematically proves the execution is safe. 
+Read the full manifesto: [The HIP Vision](docs/HIP_VISION.md) and see how Candor stacks up: [Candor vs The Industry](docs/CANDOR_VS_INDUSTRY.md).
+
 ---
 
 ## A Taste of Candor
