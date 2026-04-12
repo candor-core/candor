@@ -22,8 +22,9 @@
 
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Status: Pre-Alpha](https://img.shields.io/badge/Status-Pre--Alpha-orange.svg)]()
-[![Compiler: v0.2.0](https://img.shields.io/badge/Compiler-v0.2.0-green.svg)](https://github.com/candor-core/candor/releases/tag/v0.2.0)
-[![Tests: passing](https://img.shields.io/badge/Tests-passing-brightgreen.svg)]()
+[![Compiler: v0.3.0](https://img.shields.io/badge/Compiler-v0.3.0-green.svg)](https://github.com/candor-core/candor/releases/tag/v0.3.0)
+[![Bootstrap: Complete](https://img.shields.io/badge/Bootstrap-Complete-brightgreen.svg)]()
+[![Tests: 20%2F20](https://img.shields.io/badge/Tests-20%2F20-brightgreen.svg)]()
 
 ---
 
