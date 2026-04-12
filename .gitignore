@@ -41,8 +41,10 @@ candorc
 # Local working notes (not for the repo)
 RENAME_CHECKLIST.md
 
-# AI session data (Claude Code worktrees, memory, internal context)
+# AI session data and internal working docs (not for the public repo)
 .claude/
+Agents_Collab.md
+docs/internal/
 
 # Test runner scratch output
 tmp/
