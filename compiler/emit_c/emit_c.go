@@ -34,6 +34,17 @@ func Emit(file *parser.File, res *typeck.Result) (string, error) {
 	return e.sb.String(), nil
 }
 
+// EmitAudit runs the C emitter with audit logging enabled. It returns the C
+// source and a populated AuditLog. Call log.RenderMarkdown() for the report.
+func EmitAudit(file *parser.File, res *typeck.Result, sourceName string) (string, *AuditLog, error) {
+	log := &AuditLog{SourceFile: sourceName}
+	e := &emitter{res: res, fileModule: fileModuleName(file), audit: log}
+	if err := e.emitFile(file); err != nil {
+		return "", nil, err
+	}
+	return e.sb.String(), log, nil
+}
+
 // fileModuleName returns the module name declared in a file, or "" for root.
 func fileModuleName(f *parser.File) string {
 	for _, d := range f.Decls {
@@ -113,6 +124,13 @@ type emitter struct {
 	// can be stored in a _cnd_fn_T_T closure struct whose ._fn field has an
 	// extra void* _env parameter.
 	namedFnTrampolines map[string]*typeck.FnType
+
+	// audit is non-nil when --emit=c-audit is active. Every Candor feature
+	// that has no C equivalent logs an entry here during emission.
+	audit *AuditLog
+
+	// currentFnName tracks the enclosing function for audit entries.
+	currentFnName string
 }
 
 func (e *emitter) freshTmp() string {
@@ -1927,13 +1945,36 @@ func (e *emitter) emitFnDecl(d *parser.FnDecl) error {
 		return err
 	}
 
+	// Track current function name for audit entries.
+	e.currentFnName = d.Name.Lexeme
+
 	// Emit effects annotation as a C comment before the definition.
 	if ann := e.res.FnEffects[d.Name.Lexeme]; ann != nil {
 		switch ann.Kind {
 		case parser.EffectsPure:
 			e.writeln("\n/* pure */")
+			if e.audit != nil {
+				e.audit.add(AuditEntry{
+					Category:    "pure",
+					FnName:      d.Name.Lexeme,
+					Line:        d.Name.Line,
+					Detail:      "pure",
+					CEquiv:      "none enforced (GCC __attribute__((pure)) is advisory)",
+					Explanation: "Candor enforces at compile time that pure functions cannot call any function with effects. No C equivalent.",
+				})
+			}
 		case parser.EffectsDecl:
 			e.writef("\n/* effects: %s */\n", strings.Join(ann.Names, ", "))
+			if e.audit != nil {
+				e.audit.add(AuditEntry{
+					Category:    "effects",
+					FnName:      d.Name.Lexeme,
+					Line:        d.Name.Line,
+					Detail:      fmt.Sprintf("effects(%s)", strings.Join(ann.Names, ", ")),
+					CEquiv:      "none (dropped — C comment only)",
+					Explanation: fmt.Sprintf("Candor enforces that only functions declaring effects(%s) can perform these operations. Any C function can perform them silently.", strings.Join(ann.Names, ", ")),
+				})
+			}
 		case parser.EffectsCap:
 			e.writef("\n/* cap: %s */\n", strings.Join(ann.Names, ", "))
 		}
@@ -1984,10 +2025,36 @@ func (e *emitter) emitFnDecl(d *parser.FnDecl) error {
 	for _, cc := range d.Contracts {
 		if cc.Kind == parser.ContractRequires {
 			e.write("    assert(")
-			if err := e.emitExpr(cc.Expr, &e.sb); err != nil {
+			var clauseSB strings.Builder
+			if err := e.emitExpr(cc.Expr, &clauseSB); err != nil {
 				return err
 			}
+			clauseStr := clauseSB.String()
+			e.write(clauseStr)
 			e.write(");\n")
+			if e.audit != nil {
+				e.audit.add(AuditEntry{
+					Category:    "requires",
+					FnName:      d.Name.Lexeme,
+					Line:        d.Name.Line,
+					Detail:      fmt.Sprintf("requires %s", clauseStr),
+					CEquiv:      fmt.Sprintf("assert(%s) — debug builds only, elided with -DNDEBUG", clauseStr),
+					Explanation: "Candor requires clauses are in the function signature — machine-readable by every caller and AI agent. C assert() is invisible to callers and can be compiled out.",
+				})
+			}
+		} else if cc.Kind == parser.ContractEnsures {
+			if e.audit != nil {
+				var clauseSB strings.Builder
+				_ = e.emitExpr(cc.Expr, &clauseSB)
+				e.audit.add(AuditEntry{
+					Category:    "ensures",
+					FnName:      d.Name.Lexeme,
+					Line:        d.Name.Line,
+					Detail:      fmt.Sprintf("ensures %s", clauseSB.String()),
+					CEquiv:      "assert() on return value — debug builds only",
+					Explanation: "Candor ensures clauses are part of the public contract. In C, the postcondition assert is internal and not visible to callers.",
+				})
+			}
 		}
 	}
 
@@ -5470,6 +5537,32 @@ func (e *emitter) emitMustOrMatch(x parser.Expr, arms []parser.MustArm, bodyType
 	res := e.freshTmp()
 
 	xType := e.res.ExprTypes[x]
+
+	// Audit: log must{} sites on result<T,E> or option<T>.
+	if e.audit != nil {
+		if xType != nil {
+			if gen, ok := xType.(*typeck.GenType); ok {
+				if gen.Con == "result" || gen.Con == "option" {
+					typeName := gen.Con
+					if len(gen.Params) > 0 {
+						typeName = fmt.Sprintf("%s<%s>", gen.Con, gen.Params[0].String())
+					}
+					line := 0
+					if pos, ok := x.(interface{ GetLine() int }); ok {
+						line = pos.GetLine()
+					}
+					e.audit.add(AuditEntry{
+						Category:    "must",
+						FnName:      e.currentFnName,
+						Line:        line,
+						Detail:      fmt.Sprintf("must{} on %s", typeName),
+						CEquiv:      "if/else on _ok or NULL check",
+						Explanation: fmt.Sprintf("Candor enforces that discarding this %s is a compile error. In C, the caller can ignore the return value silently.", typeName),
+					})
+				}
+			}
+		}
+	}
 
 	var xb strings.Builder
 	if err := e.emitExpr(x, &xb); err != nil {

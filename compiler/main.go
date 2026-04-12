@@ -83,6 +83,8 @@ func main() {
 		err = cmdDoc(os.Args[2:])
 	case "fetch":
 		err = cmdFetch(os.Args[2:])
+	case "audit":
+		err = cmdAudit(os.Args[2:])
 	case "help", "--help", "-h":
 		fmt.Println(usage)
 	default:
@@ -506,6 +508,84 @@ func runTestHarness(srcFiles []string, tests []testFn) error {
 	run.Stdout = os.Stdout
 	run.Stderr = os.Stderr
 	return run.Run()
+}
+
+// ── candorc audit ─────────────────────────────────────────────────────────────
+
+// cmdAudit compiles .cnd files and emits both a .c file and a .audit.md report.
+// The report documents every Candor safety feature (effects, requires, ensures,
+// must{}, pure, secret<T>) that has no equivalent in C, with per-instance line
+// references back to the Candor source.
+func cmdAudit(args []string) error {
+	targets, err := resolveTargets(filterFlags(args))
+	if err != nil {
+		return err
+	}
+	if len(targets) == 0 {
+		return fmt.Errorf("audit: no .cnd files specified")
+	}
+
+	srcs := make(map[string]string)
+	var files []*parser.File
+	for _, srcPath := range targets {
+		raw, err := os.ReadFile(srcPath)
+		if err != nil {
+			return err
+		}
+		src := string(raw)
+		srcs[srcPath] = src
+		tokens, err := lexer.Tokenize(srcPath, src)
+		if err != nil {
+			return renderLexParseError(err, srcPath, src)
+		}
+		file, err := parser.Parse(srcPath, tokens)
+		if err != nil {
+			return renderLexParseError(err, srcPath, src)
+		}
+		files = append(files, file)
+	}
+
+	files, err = injectCHeaders(files, srcs)
+	if err != nil {
+		return err
+	}
+
+	sm := diagnostics.NewSourceMap(srcs)
+	res, err := typeck.CheckProgram(files)
+	printWarnings(res, sm)
+	if err != nil {
+		return renderTypeckError(err, sm)
+	}
+
+	merged := mergeFiles(targets[0], files)
+	sourceName := filepath.Base(targets[0])
+
+	cSrc, log, err := emit_c.EmitAudit(merged, res, sourceName)
+	if err != nil {
+		return err
+	}
+
+	base := strings.TrimSuffix(targets[0], filepath.Ext(targets[0]))
+	cPath := base + ".c"
+	auditPath := base + ".audit.md"
+
+	if err := os.WriteFile(cPath, []byte(cSrc), 0o644); err != nil {
+		return err
+	}
+	// Write runtime header alongside the .c file.
+	rtPath := filepath.Join(filepath.Dir(cPath), "_cnd_runtime.h")
+	if err := os.WriteFile(rtPath, []byte(emit_c.RuntimeHeader()), 0o644); err != nil {
+		return err
+	}
+
+	report := log.RenderMarkdown()
+	if err := os.WriteFile(auditPath, []byte(report), 0o644); err != nil {
+		return err
+	}
+
+	fmt.Printf("audit: %s → %s + %s (%d audit entries)\n",
+		sourceName, filepath.Base(cPath), filepath.Base(auditPath), len(log.Entries))
+	return nil
 }
 
 // ── candorc mcp ──────────────────────────────────────────────────────────────
