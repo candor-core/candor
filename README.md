@@ -408,6 +408,12 @@ The self-hosted compiler is written in Candor. It is the proof that the language
 
 ---
 
+## Built With AI, For a World That Uses AI
+
+Agentic AI coding is real, it is here, and CandorCore was built with it. Claude, Gemini, GitHub Copilot, and several local models have all contributed — some with feedback, others with content, structure, and code. That experience is part of why this language exists. Working alongside AI on a systems language makes the gaps in most languages visible fast: hidden side effects, silently swallowed errors, preconditions buried in comments no agent will read. Trust by Design is not a marketing position. It is a response to what building this way actually revealed.
+
+---
+
 ## Trust by Design
 
 People are split on AI-generated code. Some embrace it. Many fear it — not because AI writes bad syntax, but because **they can't see what the code is doing**. Hidden side effects. Silently swallowed errors. Implicit behavior that only makes sense if you already know the codebase.
