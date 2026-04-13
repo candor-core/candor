@@ -24,7 +24,7 @@
 [![Status: Pre-Alpha](https://img.shields.io/badge/Status-Pre--Alpha-orange.svg)]()
 [![Compiler: v0.3.0](https://img.shields.io/badge/Compiler-v0.3.0-green.svg)](https://github.com/candor-core/candor/releases/tag/v0.3.0)
 [![Bootstrap: Complete](https://img.shields.io/badge/Bootstrap-Complete-brightgreen.svg)]()
-[![Tests: 20%2F20](https://img.shields.io/badge/Tests-20%2F20-brightgreen.svg)]()
+[![Tests: 21%2F21](https://img.shields.io/badge/Tests-21%2F21-brightgreen.svg)]()
 
 ---
 
@@ -62,7 +62,7 @@ fn main() -> unit effects(io) {
         ok(val) => val
         err(e)  => return unit
     }
-    print(_cnd_int_to_str(quotient))
+    print(int_to_str(quotient))
     return unit
 }
 ```
@@ -389,6 +389,8 @@ The Go compiler is the full-featured reference implementation. It accepts `.cnd`
 | MCP tool annotations (#mcp_tool) | Complete |
 | LSP server (diagnostics, hover, completion) | Complete |
 | set\<T\> | Complete |
+| Go emitter (`candorc emit-go` → idiomatic Go + audit report) | Complete |
+| C audit report (`candorc audit` → `.audit.md`) | Complete |
 | Allocator layer | Future |
 
 ### Candor Self-Hosted Compiler — Bootstrap
@@ -402,7 +404,7 @@ The self-hosted compiler is written in Candor. It is the proof that the language
 | Type checker (`typeck.cnd`) | Complete |
 | C emitter (`emit_c.cnd`) | Complete |
 | Bootstrap idempotency (`diff stage2.c stage4.c` = 0) | **Verified** |
-| 20/20 test cases passing via `lexer.exe` | **Verified** |
+| 21/21 test cases passing via `lexer.exe` | **Verified** |
 | LLVM IR / Wasm emitter in Candor | Future |
 | Full generics in self-hosted path | Future |
 

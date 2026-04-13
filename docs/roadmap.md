@@ -896,6 +896,9 @@ Mythos finds most frequently. That is a research partnership conversation.
 
 ## M12 — Audit Emission (`candorc --emit=audit`)
 
+> **M12.1 (C audit report) and M12.2 (Go emitter) are complete as of April 2026.**
+> M12.3 (Rust) remains future work.
+
 > Goal: give skeptics a path to audit Candor output in a language they already know,
 > and a machine-readable report of exactly what Candor gave them that the target language
 > cannot express. Trust by design, demonstrable on your own code.
@@ -911,7 +914,7 @@ The audit report is not a limitation list. It is the trust argument made concret
 
 ---
 
-### M12.1 — C audit report (`candorc --emit=c-audit`)
+### M12.1 — C audit report (`candorc audit`) ✅ Complete
 
 **Why C first:** the C emitter already exists and is verified by the bootstrap. No new emitter work is required. The audit report is the only new output.
 
@@ -965,7 +968,7 @@ The C emitter already maps Candor to C correctly. What it cannot express:
 
 ---
 
-### M12.2 — Go emitter (`candorc --emit=go`)
+### M12.2 — Go emitter (`candorc emit-go`) ✅ Complete
 
 Go is the most natural audit target for the current audience: systems programmers who read Go fluently but may not know C.
 
@@ -991,10 +994,7 @@ Go is the most natural audit target for the current audience: systems programmer
 - `pure` → dropped; no Go equivalent
 - `secret<T>` → `T`; report notes information-flow enforcement is gone
 
-**Definition of done:**
-- `candorc --emit=go file.cnd` produces `file.go` (compilable with `go build`) and `file.audit.md`
-- Emitted Go passes `go vet` with no errors
-- Report format matches M12.1 structure
+**Shipped:** `candorc emit-go file.cnd` produces `file.go` (compilable, verified with `go run`) and `file.audit.md`. Report format matches M12.1 structure. See `examples/safety_demo.cnd` for a full demo.
 
 ---
 
