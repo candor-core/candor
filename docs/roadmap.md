@@ -63,6 +63,8 @@ The next goal is Stage 2: `candorc-stage1` compiling itself.
 | **M9.16–9.17** | emit_c.cnd: scope tracking, box builtins, forward decls, index, vec ordering, match/must fixes | 2026-04-04 |
 | **M9.18** | **Stage 2 self-hosting**: `stage3.exe` (GCC-compiled from Candor-emitted C) successfully compiles all 6 Candor compiler source files — exits 0, 11,616 lines. Three root-cause fixes in `emit_c.cnd`: (1) `arm_is_terminal_blk` over-firing on side-effect blocks causing double-push in merge_files; (2) `emit_block_expr` discarding implicit tail ExprS as void; (3) `arm_is_terminal` recursion into Match/Must expressions. | 2026-04-08 |
 | **M9.19** | **Full bootstrap idempotency**: stage4.c == stage2.c (0 diff lines). stage4.exe compiles (0 GCC errors) and produces identical output. Root cause of final divergence: catchall terminal arms (`_ => return none`) in `emit_match_expr` were emitted as always-true if-blocks that shadowed all subsequent value arms — causing `stmt_to_expr` to always return NULL, making all implicit tail returns emit as `(void)(expr)`. Fix: `arm_cond_is_catchall` helper + catchall terminals moved to ternary else position in `emit_match_expr`/`emit_must_expr`. Candor is now fully self-hosting. | 2026-04-09 |
+| **M12.1** | `candorc audit` — C audit report: emits `.c` + `.audit.md` (Markdown report of every Candor safety feature with no C equivalent — effects, pure, requires, ensures, must{}, secret<T>). AuditLog target-aware ("Candor → C Audit Report"). | 2026-04-10 |
+| **M12.2** | `candorc emit-go` — Go emitter: emits idiomatic `.go` (compilable, verified with `go run`) + `.audit.md` ("Candor → Go Audit Report"). Full type mapping, ok/err multi-return, must{} → if err != nil, result<T,E> match → if/else, requires → runtime panic. See `examples/safety_demo.cnd`. | 2026-04-13 |
 
 ### Known language gaps (not yet wired)
 - Named-return / early-exit in closures
@@ -150,6 +152,52 @@ struct Config { name: str, limit: i64, tags: vec<str> }
 ```
 - Auto-generates `config_from_json(str) -> result<Config, str>` and `config_to_json(Config) -> str`
 - Useful for AI agents exchanging structured data without FFI boilerplate
+
+### M7.5 — Google ADK and A2A protocol support
+
+> Goal: make Candor-defined agents first-class citizens in Google's Agent Development Kit
+> and interoperable via the Agent-to-Agent (A2A) protocol.
+
+**Background:** Google ADK (Agent Development Kit) is a framework for building, evaluating, and deploying AI agents. A2A is Google's open protocol for agent-to-agent interoperability — agents advertise capabilities via an `AgentCard`, communicate via structured tasks, and can be discovered and invoked by other agents regardless of the underlying framework.
+
+Candor is a natural fit: an agent whose capabilities are declared via `effects(...)`, whose inputs are typed structs with `requires` contracts, and whose outputs are `result<T,E>` values is already expressing exactly what A2A expects in its `AgentCard` and task schema.
+
+**M7.5.1 — `#[adk_agent]` annotation**
+
+```candor
+#[adk_agent(
+    name        = "transfer-agent",
+    description = "Moves funds between accounts with full audit trail",
+    version     = "1.0.0"
+)]
+fn transfer(from: Account, to: Account, amount: i64) -> result<str, str>
+    requires amount > 0
+    effects(io)
+{ ... }
+```
+
+- `candorc adk` emits a Google ADK-compatible Python agent wrapper from annotated Candor functions
+- The wrapper calls the compiled Candor binary via subprocess or FFI; the Candor type signatures become the ADK tool schema automatically
+- `requires` clauses become input validation before the agent is invoked
+- `effects(...)` declarations map to ADK capability declarations
+
+**M7.5.2 — A2A `AgentCard` emission**
+
+```candor
+candorc a2a transfer_agent.cnd   →   agent_card.json
+```
+
+- Emits a standards-compliant A2A `AgentCard` JSON from annotated Candor functions
+- Each `#[adk_agent]` function becomes a `skill` entry in the card
+- Input/output schemas derived from Candor struct types and `result<T,E>` return signatures
+- `effects(...)` declarations map to capability claims in the card
+- `requires` clauses become `inputModes` constraints
+
+**Why this matters for Candor's trust model:**
+
+An A2A agent that was written in Candor carries its capability declarations in the language itself — not just in the `AgentCard` JSON that can be edited or spoofed. The Candor source is the ground truth. The `AgentCard` is a derived artifact. Any agent that consumes the card can, optionally, verify it against the source or compiled binary's embedded metadata.
+
+This is "Trust by Design" applied to multi-agent systems: the honesty guarantee extends past the boundary of a single process.
 
 ---
 
@@ -786,6 +834,7 @@ Goal  ──── M9.15  Stage 2 self-hosting (stage1 compiles itself, diff pro
 | Capability tokens `cap<T>` (M7.3) | Medium | High — compile-time hardware tier enforcement |
 | Symbolic contract eval (M6.1) | Medium | High — improves correctness guarantees |
 | MCP tool annotations (M7.1) | Medium | High — unlocks AI agent tooling |
+| Google ADK + A2A protocol support (M7.5) | Medium | High — Candor agents interoperable in Google ADK pipelines; A2A AgentCard derived from Candor type signatures |
 | Package registry (M8.1) | High | Very high — unlocks ecosystem growth |
 | `heap<T>`, `arena<T>`, `trie<K,V>`, `weak<T>` stdlib (M10.4) | Medium | High — inference scheduling |
 | `std/vecdb.cnd` HNSW + IVF (M11.5) | High | High — native vector DB without FAISS dep |
