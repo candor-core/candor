@@ -93,6 +93,29 @@ simultaneously amending the higher layer with a migration path.
 | 16    | VERIFY  | DRAFT    | Formal verification (SMT, refinement)     |
 | 17    | AI      | DRAFT    | AI-layer (MCP, intent, cap tokens)        |
 
+### The Substrate Boundary
+
+Below Layer 0 sits the **Substrate Boundary** — the formal interface between
+the Candor language and the physical hardware on which it executes.
+
+The substrate is NOT a language layer. It is a target interface that compiler
+implementations satisfy. Language layers (0–17) are permanent and axiom-governed.
+The substrate is target-specific and replaceable without changing the language.
+
+| Substrate Layer | ID  | Status | Covers |
+|-----------------|-----|--------|--------|
+| S0 | SUB/S0 | DRAFT | Primitive type algebra; concrete representations |
+| S1 | SUB/S1 | DRAFT | Memory model; layout, alignment, atomics |
+| S2 | SUB/S2 | DRAFT | Execution model; calling convention, execution units |
+| S3 | SUB/S3 | DRAFT | Platform capabilities; effect tag → platform mapping |
+
+A **substrate profile** is a named, conformant implementation of S0–S3
+for a specific hardware target (e.g., `x86_64-win64`, `arm64-linux`,
+`quantum-hybrid-v1`). New hardware paradigms (quantum, ternary, GPU) are
+absorbed as new substrate profiles — the language spec does not change.
+
+See `SUBSTRATE.md` for the full substrate specification and profile roadmap.
+
 ### Layer Status Meanings
 
 **FROZEN:** Rules may only be amended to add precision or fix logical contradictions.
@@ -241,6 +264,7 @@ ambiguity is forbidden.
 |----------|--------|--------|
 | `FRAMEWORK.md` | meta | FROZEN |
 | `INDEX.md` | all | STABLE |
+| `SUBSTRATE.md` | SUB / S0–S3 | DRAFT |
 | `L0-AXIOMS.md` | AXIOM | FROZEN |
 | `L1-LEXER.md` | LEX | FROZEN |
 | `L2-SYNTAX.md` | SYN | FROZEN |

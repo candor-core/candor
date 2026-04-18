@@ -158,6 +158,13 @@ An AI agent or human reading this index can answer:
 | Concept | Rule IDs | Document |
 |---------|----------|----------|
 | `secret<T>` wrapper | AI-020 | L17-AI.md |
+| Substrate boundary (language/hardware interface) | SUB-001 | SUBSTRATE.md |
+| Substrate profile (named target implementation) | SUB-050, SUB-051 | SUBSTRATE.md |
+| Substrate extensions (qbit, quantum effects, etc.) | SUB-051 | SUBSTRATE.md |
+| S0 — Primitive type algebra | SUB-010, SUB-011 | SUBSTRATE.md |
+| S1 — Memory model | SUB-020, SUB-021 | SUBSTRATE.md |
+| S2 — Execution model / calling convention | SUB-030, SUB-031 | SUBSTRATE.md |
+| S3 — Platform capabilities / effect tag mapping | SUB-040 | SUBSTRATE.md |
 | `set<T>` | COL-040 | L12-COLLECTIONS.md |
 | `some(x)` option variant | TYP-051 | L3-TYPES.md |
 | `spawn` expression | CONC-020 | L14-CONCURRENCY.md |
@@ -226,6 +233,7 @@ When a compiler produces an error, find the governing rule here.
 
 | Range | Document |
 |-------|----------|
+| SUB-001 – SUB-099 | `SUBSTRATE.md` |
 | AXIOM-001 – AXIOM-099 | `L0-AXIOMS.md` |
 | LEX-001 – LEX-099 | `L1-LEXER.md` |
 | SYN-001 – SYN-099 | `L2-SYNTAX.md` |
