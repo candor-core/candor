@@ -255,6 +255,8 @@ struct FnSig {
     params:      vec<ParamSig>
     ret:         Type
     is_generic:  bool
+    is_pure:     bool
+    effs:        vec<str>
 }
 
 ## ── scope (linked list of name→type bindings) ─────────────────────────────────
@@ -314,20 +316,26 @@ fn scope_lookup(ss: ref<ScopeStack>, name: str) -> option<Type> {
 
 ## ── type environment ──────────────────────────────────────────────────────────
 struct TypeEnv {
-    structs:  map<str, StructDef>
-    enums:    map<str, EnumDef>
-    fns:      map<str, FnSig>
-    errors:   vec<str>
-    warnings: vec<str>
+    structs:      map<str, StructDef>
+    enums:        map<str, EnumDef>
+    fns:          map<str, FnSig>
+    errors:       vec<str>
+    warnings:     vec<str>
+    cur_fn_name:  str
+    cur_is_pure:  bool
+    cur_effs:     vec<str>
 }
 
 fn type_env_new() -> TypeEnv {
     return TypeEnv{
-        structs:  map_new(),
-        enums:    map_new(),
-        fns:      map_new(),
-        errors:   vec_new(),
-        warnings: vec_new()
+        structs:     map_new(),
+        enums:       map_new(),
+        fns:         map_new(),
+        errors:      vec_new(),
+        warnings:    vec_new(),
+        cur_fn_name: "",
+        cur_is_pure: false,
+        cur_effs:    vec_new()
     }
 }
 
@@ -626,7 +634,7 @@ fn fill_fn(fd: box<FnDecl>, env: refmut<TypeEnv>) -> unit {
     let psigs = collect_params_or(params, pfx, env)
     let rpfx = str_concat("fn ", str_concat(fname, " return: "))
     let ret = resolve_ret_or(ret_te, rpfx, env)
-    map_insert(env.fns, fname, FnSig{ params: psigs, ret: ret, is_generic: is_generic })
+    map_insert(env.fns, fname, FnSig{ params: psigs, ret: ret, is_generic: is_generic, is_pure: f.pure_, effs: f.effs })
     return unit
 }
 
@@ -639,7 +647,7 @@ fn fill_extern(xd: box<ExternDecl>, env: refmut<TypeEnv>) -> unit {
     let psigs = collect_params_or(params, pfx, env)
     let rpfx = str_concat("extern ", str_concat(xname, " return: "))
     let ret = resolve_ret_or(ret_te, rpfx, env)
-    map_insert(env.fns, xname, FnSig{ params: psigs, ret: ret, is_generic: false })
+    map_insert(env.fns, xname, FnSig{ params: psigs, ret: ret, is_generic: false, is_pure: false, effs: vec_new() })
     return unit
 }
 
@@ -1238,12 +1246,16 @@ fn define_params_in_scope(params: vec<Param>, ss: refmut<ScopeStack>, env: refmu
 }
 
 fn check_fn_body(f: FnDecl, env: refmut<TypeEnv>) -> unit {
+    env.cur_fn_name = f.name
+    env.cur_is_pure = f.pure_
+    env.cur_effs    = f.effs
     let mut ss = scope_stack_new()
     let _idx = scope_push(refmut(ss))
     define_params_in_scope(f.params, refmut(ss), env)
     let ret_ty = resolve_or_unknown(f.ret, env)
     check_stmts(f.body, refmut(ss), env, ret_ty)
     scope_pop(refmut(ss))
+    check_body_effects(f.body, env)
     return unit
 }
 
@@ -1268,6 +1280,246 @@ fn check_bodies(pf: ref<ParsedFile>, env: refmut<TypeEnv>) -> unit {
         if i >= n { break }
         check_decl_body(pf.decls[i as u64], env)
         i = i + 1
+    }
+    return unit
+}
+
+## ── Effects enforcement (AXIOM-002) ──────────────────────────────────────────
+##
+## EFFECTS-001: a function marked `pure` may not call any non-pure function
+##              (user-defined or builtin with observable I/O effects).
+##
+## Enforcement is a separate walk over the function body AST that runs after
+## the type-check pass. The current function's context (cur_fn_name, cur_is_pure,
+## cur_effects) is set on TypeEnv by check_fn_body before the walk begins.
+
+fn builtin_has_io_effect(name: str) -> bool pure {
+    if str_eq(name, "print")            { return true }
+    if str_eq(name, "println")          { return true }
+    if str_eq(name, "print_err")        { return true }
+    if str_eq(name, "read_file")        { return true }
+    if str_eq(name, "write_file")       { return true }
+    if str_eq(name, "append_file")      { return true }
+    if str_eq(name, "try_read_line")    { return true }
+    if str_eq(name, "read_line")        { return true }
+    if str_eq(name, "flush_stdout")     { return true }
+    if str_eq(name, "os_exec")          { return true }
+    if str_eq(name, "os_getenv")        { return true }
+    if str_eq(name, "os_cwd")           { return true }
+    if str_eq(name, "os_mkdir")         { return true }
+    if str_eq(name, "path_exists")      { return true }
+    if str_eq(name, "time_sleep_ms")    { return true }
+    if str_eq(name, "rand_u64")         { return true }
+    if str_eq(name, "rand_f64")         { return true }
+    if str_eq(name, "rand_set_seed")    { return true }
+    if str_eq(name, "time_now_ms")      { return true }
+    if str_eq(name, "time_now_mono_ns") { return true }
+    return false
+}
+
+fn effects_has(effs: vec<str>, name: str) -> bool {
+    let n = vec_len(effs) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        if str_eq(effs[i as u64], name) { return true }
+        i = i + 1
+    }
+    return false
+}
+
+## Check effects constraints when fn_name is called from the current function context.
+##
+## EFFECTS-001 triggers when a `pure` function calls:
+##   (a) a builtin known to have observable I/O effects, OR
+##   (b) a user-defined function explicitly annotated with effects(...)
+##
+## A function with NO annotation (unannotated) is treated as unknown purity — a
+## `pure` caller may call it. This is intentionally permissive: the obligation to
+## propagate effects annotations flows from callee to caller as the codebase matures.
+fn check_call_effects(fn_name: str, env: refmut<TypeEnv>) -> unit {
+    if env.cur_is_pure {
+        ## (a) Block calls to I/O builtins
+        if builtin_has_io_effect(fn_name) {
+            env_error(env, str_concat("[EFFECTS-001] pure fn '",
+                str_concat(env.cur_fn_name, str_concat("' may not call effectful builtin '",
+                str_concat(fn_name, "'")))))
+            return unit
+        }
+        ## (b) Block calls to functions explicitly annotated with effects(...)
+        let callee = map_get(env.fns, fn_name) must {
+            some(s) => s
+            none    => return unit
+        }
+        if vec_len(callee.effs) as i64 > 0 {
+            env_error(env, str_concat("[EFFECTS-001] pure fn '",
+                str_concat(env.cur_fn_name, str_concat("' may not call effects-annotated fn '",
+                str_concat(fn_name, "'")))))
+        }
+        return unit
+    }
+    return unit
+}
+
+## Recursive AST walkers — visit every call expression in a function body.
+## check_body_effects / check_stmt_effects / check_expr_effects are mutually recursive.
+
+fn check_body_effects(stmts: vec<Stmt>, env: refmut<TypeEnv>) -> unit {
+    let n = vec_len(stmts) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        check_stmt_effects(stmts[i as u64], env)
+        i = i + 1
+    }
+    return unit
+}
+
+fn check_iob_effects(eib: IfOrBlock, env: refmut<TypeEnv>) -> unit {
+    match eib {
+        IfOrBlock::ElseIf(is_)    => {
+            let ifs = box_deref(is_)
+            check_expr_effects(ifs.cond, env)
+            check_body_effects(ifs.then_, env)
+            ifs.else_ must {
+                none    => unit
+                some(e) => check_iob_effects(box_deref(e), env)
+            }
+        }
+        IfOrBlock::ElseBlock(els) => check_body_effects(els, env)
+    }
+    return unit
+}
+
+fn check_stmt_effects(stmt: Stmt, env: refmut<TypeEnv>) -> unit {
+    match stmt {
+        Stmt::LetS(ls) => {
+            let l = box_deref(ls)
+            check_expr_effects(l.init, env)
+        }
+        Stmt::LetTupS(lts) => {
+            let l = box_deref(lts)
+            check_expr_effects(l.init, env)
+        }
+        Stmt::AssignS(a) => {
+            let as_ = box_deref(a)
+            check_expr_effects(as_.value, env)
+        }
+        Stmt::ExprS(e)    => check_expr_effects(box_deref(e), env)
+        Stmt::ReturnS(e)  => check_expr_effects(box_deref(e), env)
+        Stmt::AssertS(a)  => check_expr_effects(box_deref(a).expr, env)
+        Stmt::IfS(is_) => {
+            let ifs = box_deref(is_)
+            check_expr_effects(ifs.cond, env)
+            check_body_effects(ifs.then_, env)
+            ifs.else_ must {
+                none    => unit
+                some(e) => check_iob_effects(box_deref(e), env)
+            }
+        }
+        Stmt::WhileS(ws) => {
+            let w = box_deref(ws)
+            check_expr_effects(w.cond, env)
+            check_body_effects(w.body, env)
+        }
+        Stmt::ForS(fs) => {
+            let f = box_deref(fs)
+            check_expr_effects(f.iter, env)
+            check_body_effects(f.body, env)
+        }
+        Stmt::LoopS(body)  => check_body_effects(body, env)
+        Stmt::BreakS       => unit
+        Stmt::ContinueS    => unit
+    }
+    return unit
+}
+
+fn check_expr_effects(expr: Expr, env: refmut<TypeEnv>) -> unit {
+    match expr {
+        Expr::Call(c) => {
+            let ca = box_deref(c)
+            let nm = callee_name(ca.callee) must {
+                some(n) => n
+                none    => return unit
+            }
+            check_call_effects(nm, env)
+            let nargs = vec_len(ca.args) as i64
+            let mut i: i64 = 0
+            loop {
+                if i >= nargs { break }
+                check_expr_effects(ca.args[i as u64], env)
+                i = i + 1
+            }
+        }
+        Expr::Binary(b) => {
+            let bo = box_deref(b)
+            check_expr_effects(bo.left, env)
+            check_expr_effects(bo.right, env)
+        }
+        Expr::Unary(u)    => check_expr_effects(box_deref(u).operand, env)
+        Expr::Cast(c)     => check_expr_effects(box_deref(c).operand, env)
+        Expr::Field(f)    => check_expr_effects(box_deref(f).receiver, env)
+        Expr::Index(ix) => {
+            let ixe = box_deref(ix)
+            check_expr_effects(ixe.collection, env)
+            check_expr_effects(ixe.index, env)
+        }
+        Expr::SomeExpr(e) => check_expr_effects(box_deref(e), env)
+        Expr::OkExpr(e)   => check_expr_effects(box_deref(e), env)
+        Expr::ErrExpr(e)  => check_expr_effects(box_deref(e), env)
+        Expr::Return(e)   => check_expr_effects(box_deref(e), env)
+        Expr::AddrOf(e)   => check_expr_effects(box_deref(e), env)
+        Expr::OldExpr(e)  => check_expr_effects(box_deref(e), env)
+        Expr::Block(b) => {
+            let blk = box_deref(b)
+            check_body_effects(blk.stmts, env)
+            blk.final_expr must {
+                none    => unit
+                some(e) => check_expr_effects(box_deref(e), env)
+            }
+        }
+        Expr::Match(m) => {
+            let me = box_deref(m)
+            check_expr_effects(me.subject, env)
+            let n = vec_len(me.arms) as i64
+            let mut i: i64 = 0
+            loop {
+                if i >= n { break }
+                check_expr_effects(me.arms[i as u64].body, env)
+                i = i + 1
+            }
+        }
+        Expr::Must(m) => {
+            let me = box_deref(m)
+            check_expr_effects(me.subject, env)
+            let n = vec_len(me.arms) as i64
+            let mut i: i64 = 0
+            loop {
+                if i >= n { break }
+                check_expr_effects(me.arms[i as u64].body, env)
+                i = i + 1
+            }
+        }
+        Expr::VecLit(elems) => {
+            let n = vec_len(elems) as i64
+            let mut i: i64 = 0
+            loop {
+                if i >= n { break }
+                check_expr_effects(elems[i as u64], env)
+                i = i + 1
+            }
+        }
+        Expr::StructLit(s) => {
+            let se = box_deref(s)
+            let n = vec_len(se.fields) as i64
+            let mut i: i64 = 0
+            loop {
+                if i >= n { break }
+                check_expr_effects(se.fields[i as u64].value, env)
+                i = i + 1
+            }
+        }
+        _ => unit
     }
     return unit
 }

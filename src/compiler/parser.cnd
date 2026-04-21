@@ -229,7 +229,7 @@ enum Stmt {
 
 struct Param     { name: str, typ: TypeExpr }
 struct FnDecl    { name: str, type_params: vec<str>, params: vec<Param>, ret: TypeExpr,
-                   pure_: bool, body: vec<Stmt>, line: i64 }
+                   pure_: bool, effs: vec<str>, body: vec<Stmt>, line: i64 }
 struct StructDecl { name: str, type_params: vec<str>, fields: vec<StructFieldDecl>, line: i64 }
 struct StructFieldDecl { name: str, typ: TypeExpr }
 struct EnumVariant { name: str, payload: vec<TypeExpr> }
@@ -988,6 +988,25 @@ fn par_parse_type_params(p: refmut<Parser>) -> result<vec<str>, str> {
     return ok(tps)
 }
 
+## Parse 'effects(io, net, ...)' annotation after a return type.
+## Returns the list of declared effect names, or empty vec if not present.
+fn par_parse_effects_list(p: refmut<Parser>) -> vec<str> {
+    let mut eff: vec<str> = vec_new()
+    if not par_check(p, TK_EFFECTS()) { return eff }
+    par_advance(p)
+    if not par_check(p, TK_LPAREN()) { return eff }
+    par_advance(p)
+    loop {
+        if par_check(p, TK_RPAREN()) { break }
+        if par_at_end(p) { break }
+        let tok = par_advance(p)
+        if tok.kind == TK_IDENT() { vec_push(eff, tok.lexeme) }
+        let _cm = par_match(p, TK_COMMA())
+    }
+    let _rp = par_match(p, TK_RPAREN())
+    return eff
+}
+
 fn par_parse_fn_decl(p: refmut<Parser>) -> result<Decl, str> {
     let line = par_peek(p).line
     par_skip_annotations(p)
@@ -998,6 +1017,7 @@ fn par_parse_fn_decl(p: refmut<Parser>) -> result<Decl, str> {
     let _t = par_expect(p, TK_ARROW(), "->") must { ok(t) => t   err(e) => return err(e) }
     let ret = par_parse_type(p) must { ok(t) => t   err(e) => return err(e) }
     let is_pure = par_match(p, TK_PURE())
+    let effs = par_parse_effects_list(p)
     par_skip_annotations(p)
     let body = par_parse_block_stmts(p) must { ok(v) => v   err(e) => return err(e) }
     return ok(Decl::FnD(box_new(FnDecl{
@@ -1006,6 +1026,7 @@ fn par_parse_fn_decl(p: refmut<Parser>) -> result<Decl, str> {
         params: params,
         ret: ret,
         pure_: is_pure,
+        effs: effs,
         body: body,
         line: line
     })))
