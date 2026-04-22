@@ -44,6 +44,7 @@ Usage:
   candorc mcp   [file.cnd ...]                emit tools.json MCP manifest for #mcp_tool functions
   candorc doc   [file.cnd ...]                emit intent.json for #intent-annotated functions
   candorc doc   --html [file.cnd ...]         emit docs.html API reference from /// doc comments
+  candorc agent-json [file.cnd ...]           compile and emit machine-readable JSON result (always exits 0)
 
 Flags may be combined: candorc build --release --simd --backend=llvm --sanitize=address,undefined
 Target examples: aarch64-unknown-linux-gnu  x86_64-apple-macosx14.0  wasm32 (alias for wasm32-unknown-unknown)
@@ -88,6 +89,8 @@ func main() {
 		err = cmdAudit(os.Args[2:])
 	case "emit-go":
 		err = cmdEmitGo(os.Args[2:])
+	case "agent-json":
+		err = cmdAgentJson(os.Args[2:])
 	case "help", "--help", "-h":
 		fmt.Println(usage)
 	default:
@@ -660,6 +663,208 @@ func cmdEmitGo(args []string) error {
 	fmt.Printf("emit-go: %s → %s + %s (%d audit entries)\n",
 		sourceName, filepath.Base(goPath), filepath.Base(auditPath), len(auditLog.Entries))
 	return nil
+}
+
+// ── candorc agent-json ────────────────────────────────────────────────────────
+
+// agentDiag is one structured compiler diagnostic in the agent-json output.
+type agentDiag struct {
+	Rule    string `json:"rule"`
+	File    string `json:"file"`
+	Line    int    `json:"line,omitempty"`
+	Col     int    `json:"col,omitempty"`
+	Message string `json:"message"`
+	Context string `json:"context,omitempty"`
+	FixHint string `json:"fix_hint,omitempty"`
+}
+
+// agentJSON is the top-level agent-json response.
+type agentJSON struct {
+	Status string      `json:"status"`
+	Output string      `json:"output,omitempty"`
+	Errors []agentDiag `json:"errors,omitempty"`
+}
+
+// cmdAgentJson runs the compile pipeline and writes a machine-readable JSON
+// result to stdout, always exiting 0 so the caller can parse the JSON.
+// On success: {"status":"ok","output":"path.exe"}
+// On error:   {"status":"error","errors":[{"rule":"EFFECTS-001",...},...]}
+func cmdAgentJson(args []string) error {
+	srcPaths := filterFlags(args)
+	if len(srcPaths) == 0 {
+		return emitAgentJSON(agentJSON{Status: "error", Errors: []agentDiag{{Rule: "ARGS", Message: "no source files specified"}}})
+	}
+
+	srcs := make(map[string]string, len(srcPaths))
+	files := make([]*parser.File, 0, len(srcPaths))
+
+	for _, srcPath := range srcPaths {
+		raw, readErr := os.ReadFile(srcPath)
+		if readErr != nil {
+			return emitAgentJSON(agentJSON{Status: "error", Errors: []agentDiag{{
+				Rule: "IO", File: filepath.Base(srcPath),
+				Message: fmt.Sprintf("cannot read file: %v", readErr),
+			}}})
+		}
+		src := string(raw)
+		srcs[srcPath] = src
+
+		tokens, lexErr := lexer.Tokenize(srcPath, src)
+		if lexErr != nil {
+			if le, ok := lexErr.(*lexer.Error); ok {
+				return emitAgentJSON(agentJSON{Status: "error", Errors: []agentDiag{{
+					Rule: "PARSE", File: filepath.Base(le.File), Line: le.Line, Col: le.Col,
+					Message: le.Msg, Context: agentSourceLine(src, le.Line),
+					FixHint: "Fix the syntax error shown above",
+				}}})
+			}
+			return emitAgentJSON(agentJSON{Status: "error", Errors: []agentDiag{{Rule: "PARSE", Message: lexErr.Error()}}})
+		}
+
+		file, parseErr := parser.Parse(srcPath, tokens)
+		if parseErr != nil {
+			return emitAgentJSON(agentJSON{Status: "error", Errors: []agentDiag{{
+				Rule: "PARSE", File: filepath.Base(srcPath), Message: parseErr.Error(),
+			}}})
+		}
+		files = append(files, file)
+	}
+
+	injected, injectErr := injectCHeaders(files, srcs)
+	if injectErr != nil {
+		return emitAgentJSON(agentJSON{Status: "error", Errors: []agentDiag{{Rule: "HEADER", Message: injectErr.Error()}}})
+	}
+	files = injected
+
+	res, typeckErr := typeck.CheckProgram(files)
+	if typeckErr != nil {
+		return emitAgentJSON(agentJSON{Status: "error", Errors: collectAgentErrors(typeckErr, srcs)})
+	}
+
+	merged := mergeFiles(srcPaths[0], files)
+	cSrc, emitErr := emit_c.Emit(merged, res)
+	if emitErr != nil {
+		return emitAgentJSON(agentJSON{Status: "error", Errors: []agentDiag{{Rule: "EMIT", Message: emitErr.Error()}}})
+	}
+
+	base := strings.TrimSuffix(srcPaths[0], filepath.Ext(srcPaths[0]))
+	cPath := base + ".c"
+	if err := os.WriteFile(cPath, []byte(cSrc), 0o644); err != nil {
+		return emitAgentJSON(agentJSON{Status: "error", Errors: []agentDiag{{Rule: "IO", Message: err.Error()}}})
+	}
+	rtPath := filepath.Join(filepath.Dir(cPath), "_cnd_runtime.h")
+	_ = os.WriteFile(rtPath, []byte(emit_c.RuntimeHeader()), 0o644)
+
+	outPath := base
+	if isWindows() {
+		outPath += ".exe"
+	}
+	cc := findCC()
+	var ccOut strings.Builder
+	ccCmd := exec.Command(cc, append(BuildConfig{}.ccFlags(), "-o", outPath, cPath)...)
+	ccCmd.Stdout = &ccOut
+	ccCmd.Stderr = &ccOut
+	ccCmd.Env = ccEnv(cc)
+	if ccErr := ccCmd.Run(); ccErr != nil {
+		return emitAgentJSON(agentJSON{Status: "error", Errors: []agentDiag{{
+			Rule: "CC", Message: strings.TrimSpace(ccOut.String()),
+		}}})
+	}
+
+	return emitAgentJSON(agentJSON{Status: "ok", Output: outPath})
+}
+
+// emitAgentJSON writes r as JSON to stdout and returns nil (always exit 0).
+func emitAgentJSON(r agentJSON) error {
+	out, _ := json.MarshalIndent(r, "", "  ")
+	fmt.Println(string(out))
+	return nil
+}
+
+// collectAgentErrors converts a typeck multi-error into structured agentDiag entries.
+func collectAgentErrors(err error, srcs map[string]string) []agentDiag {
+	type multiErr interface{ Unwrap() []error }
+	var errs []error
+	if me, ok := err.(multiErr); ok {
+		errs = me.Unwrap()
+	} else {
+		errs = []error{err}
+	}
+	var out []agentDiag
+	for _, e := range errs {
+		if te, ok := e.(*typeck.Error); ok {
+			rule := agentRuleID(te.Msg)
+			out = append(out, agentDiag{
+				Rule:    rule,
+				File:    filepath.Base(te.Tok.File),
+				Line:    te.Tok.Line,
+				Col:     te.Tok.Col,
+				Message: te.Msg,
+				Context: agentSourceLine(srcs[te.Tok.File], te.Tok.Line),
+				FixHint: agentFixHint(rule, te.Hint),
+			})
+		} else {
+			out = append(out, agentDiag{Rule: "COMPILER", Message: e.Error()})
+		}
+	}
+	return out
+}
+
+// agentRuleID maps a typeck error message to a short rule identifier.
+func agentRuleID(msg string) string {
+	lower := strings.ToLower(msg)
+	switch {
+	case strings.Contains(lower, "pure function cannot call"):
+		return "EFFECTS-001"
+	case strings.Contains(lower, "cannot call") && strings.Contains(lower, "requires effect"):
+		return "EFFECTS-002"
+	case strings.Contains(lower, "undeclared") || strings.Contains(lower, "undefined identifier"):
+		return "TYPE-001"
+	case strings.Contains(lower, "type mismatch") || strings.Contains(lower, "cannot use") || strings.Contains(lower, "cannot assign"):
+		return "TYPE-002"
+	case strings.Contains(lower, "missing return") || strings.Contains(lower, "not all paths"):
+		return "FLOW-001"
+	case strings.Contains(lower, "already declared") || strings.Contains(lower, "redeclared"):
+		return "NAMES-002"
+	case strings.Contains(lower, "reserved") || strings.Contains(lower, "conflicts with"):
+		return "NAMES-001"
+	default:
+		return "COMPILER"
+	}
+}
+
+// agentFixHint returns a human hint for an agent consumer, preferring the compiler's
+// own hint over the generic one.
+func agentFixHint(rule, existing string) string {
+	if existing != "" {
+		return existing
+	}
+	switch rule {
+	case "EFFECTS-001":
+		return "Remove I/O calls from this function, or change 'pure' to 'effects(io)'"
+	case "EFFECTS-002":
+		return "Add the missing effect to this function's effects(...) declaration"
+	case "TYPE-001":
+		return "Check spelling; ensure the identifier is declared before use"
+	case "TYPE-002":
+		return "Ensure types match; use int_to_str(n) to convert i64→str"
+	case "FLOW-001":
+		return "Add 'return unit' on all code paths, or ensure every branch returns a value"
+	default:
+		return ""
+	}
+}
+
+// agentSourceLine returns the source line at the given 1-based line number.
+func agentSourceLine(src string, line int) string {
+	if src == "" || line < 1 {
+		return ""
+	}
+	lines := strings.Split(src, "\n")
+	if line > len(lines) {
+		return ""
+	}
+	return strings.TrimRight(lines[line-1], "\r")
 }
 
 // ── candorc mcp ──────────────────────────────────────────────────────────────

@@ -3906,6 +3906,8 @@ func (m multiError) Error() string {
 	return strings.Join(msgs, "\n")
 }
 
+func (m multiError) Unwrap() []error { return []error(m) }
+
 // inferPathExpr handles Enum::Variant — a unit enum variant or the fn-position
 // of a call expression that constructs a data-carrying variant.
 func (c *checker) inferPathExpr(e *parser.PathExpr, sc *scope) (Type, error) {
