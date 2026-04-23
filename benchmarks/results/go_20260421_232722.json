@@ -1,0 +1,23 @@
+{
+  "language": "go",
+  "display": "Go",
+  "model": "claude-sonnet-4-6",
+  "run_id": "20260421_232722",
+  "timestamp": "2026-04-21T23:28:01.780471",
+  "rounds": [
+    {
+      "round": 1,
+      "input_tokens": 358,
+      "output_tokens": 1001,
+      "compiles": true,
+      "correct": true,
+      "compile_stderr": "",
+      "actual_output": ""
+    }
+  ],
+  "total_input_tokens": 358,
+  "total_output_tokens": 1001,
+  "total_tokens": 1359,
+  "final_compiles": true,
+  "final_correct": true
+}

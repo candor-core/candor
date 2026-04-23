@@ -1,0 +1,32 @@
+{
+  "language": "candor",
+  "display": "Candor",
+  "model": "claude-sonnet-4-6",
+  "run_id": "20260421_232722",
+  "timestamp": "2026-04-21T23:27:22.294710",
+  "rounds": [
+    {
+      "round": 1,
+      "input_tokens": 865,
+      "output_tokens": 1874,
+      "compiles": false,
+      "correct": false,
+      "compile_stderr": "candorc: D:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_232722_r1.cnd:18:33: expected expression, got ; \";\"",
+      "actual_output": ""
+    },
+    {
+      "round": 2,
+      "input_tokens": 2816,
+      "output_tokens": 1873,
+      "compiles": false,
+      "correct": false,
+      "compile_stderr": "candorc: D:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_232722_r2.cnd:18:33: expected expression, got ; \";\"",
+      "actual_output": ""
+    }
+  ],
+  "total_input_tokens": 3681,
+  "total_output_tokens": 3747,
+  "total_tokens": 7428,
+  "final_compiles": false,
+  "final_correct": false
+}

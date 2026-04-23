@@ -1,0 +1,32 @@
+{
+  "language": "candor",
+  "display": "Candor",
+  "model": "claude-sonnet-4-6",
+  "run_id": "20260421_233213",
+  "timestamp": "2026-04-21T23:32:13.690670",
+  "rounds": [
+    {
+      "round": 1,
+      "input_tokens": 3355,
+      "output_tokens": 2325,
+      "compiles": false,
+      "correct": false,
+      "compile_stderr": "candorc: D:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_233213_r1.cnd:187:16: function with effects([io]) cannot call \"os_args\" which requires effect \"sys\"\nD:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_233213_r1.cnd:188:24: undefined identifier \"args\"\nD:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_233213_r1.cnd:189:8: undefined identifier \"argc\"\nD:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_233213_r1.cnd:200:17: undefined identifier \"argc\"\nD:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_233213_r1.cnd:201:20: undefined identifier \"args\"\nD:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_233213_r1.cnd:202:41: undefined identifier \"path\"\nD:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_233213_r1.cnd:204:37: undefined identifier \"path\"\nD:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_233213_r1.cnd:212:42: undefined identifier \"filename\"\nD:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_233213_r1.cnd:213:49: undefined identifier \"content\"\nD:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_233213_r1.cnd:215:35: undefined identifier \"stats\"\nD:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_233213_r1.cnd:218:37: undefined identifier \"line_count\"\nD:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_233213_r1.cnd:219:51: undefined identifier \"stats\"",
+      "actual_output": ""
+    },
+    {
+      "round": 2,
+      "input_tokens": 6255,
+      "output_tokens": 2522,
+      "compiles": false,
+      "correct": false,
+      "compile_stderr": "candorc: D:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_233213_r2.cnd:1:26: error: unexpected character '`'\n   1 | The errors indicate that `os_args()` requires `effects(sys)` and that variables declared inside `must{}` blocks or loop bodies aren't visible outside. Let me fix these issues.\n     |                          ^",
+      "actual_output": ""
+    }
+  ],
+  "total_input_tokens": 9610,
+  "total_output_tokens": 4847,
+  "total_tokens": 14457,
+  "final_compiles": false,
+  "final_correct": false
+}

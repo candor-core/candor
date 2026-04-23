@@ -76,6 +76,65 @@ The next goal is Stage 2: `candorc-stage1` compiling itself.
 
 ## Next Up
 
+### M14 — Core Ergonomics: `?` Propagation + `|>` Pipeline
+
+> Goal: reduce the token cost and visual noise of error-handling and function chaining
+> without sacrificing explicitness. These two features interact deeply and are designed
+> together. They apply at the Candor Core level (Verification Form) — not Agent Form only.
+
+**Motivation:** The most common Candor pattern is a chain of `pure` functions that can
+fail, with `effects(io)` at the boundary. Today each step requires a `must{}` block.
+With `?` and `|>`, the same chain is expressed in a fraction of the tokens while
+remaining explicit, typed, and compiler-enforced.
+
+#### M14.1 — `?` result propagation operator
+
+```candor
+fn load_row(line: str) -> result<Row, str> pure {
+    let r = parse_row(line)?       ## extracts Row, or returns err(e) from this fn
+    validate_row(r)                ## chained — last expression is the result
+}
+
+fn run(path: str) -> result<Summary, str> effects(io) {
+    let content = read_file(path)?
+    let rows    = parse_rows(content)?
+    ok(summarize(rows))
+}
+```
+
+- `expr?` on `result<T, E>`: if `ok(v)` evaluates to `v`; if `err(e)` returns `err(e)` from the enclosing function
+- Enclosing function must return `result<T2, E2>` where `E2` is compatible with `E`
+- Error-transform variant: `expr?|f` — applies `f(e)` to the error before propagating (useful for wrapping errors across module boundaries)
+- `must{}` is retained for cases where both arms need explicit branching logic; `?` replaces the common single-arm unwrap case
+- Satisfies all 7 Candor axioms: visible (`?` token), typed (enclosing return type checked), enforced (compiler rejects incompatible propagation)
+
+**Token savings:** a typical `must { ok(v) => v  err(e) => return err(e) }` is ~12 tokens; `?` is 1.
+
+#### M14.2 — `|>` pipeline operator
+
+```candor
+fn process(path: str) -> result<Summary, str> effects(io) {
+    read_file(path)? |> parse_rows? |> validate_all? |> summarize |> ok
+}
+```
+
+- `expr |> f` desugars to `f(expr)` — left-associative, no precedence surprises
+- Chains naturally with `?`: `expr |> f?` = `f(expr)?`
+- Enables the canonical Candor pattern (`pure fn → pure fn → effectful boundary`) to read as a left-to-right data flow rather than nested calls
+- Multi-argument functions: `expr |> f(_, arg2)` uses `_` as the pipe target (explicit, no magic injection)
+
+**Token savings:** `summarize(validate_all(parse_rows(content)))` (nested, 7–9 tokens for parens + calls) vs `content |> parse_rows |> validate_all |> summarize` — same token count but left-to-right reads naturally, and the `?` form for error paths is drastically shorter.
+
+**Definition of done (M14):**
+- `?` is parsed and type-checked; enclosing return type verified at compile time
+- `?|f` error-transform variant works; `f` is typechecked against the error type
+- `|>` is parsed and desugared to nested calls before typeck; all existing tests still pass
+- `_` placeholder in pipe targets: `expr |> f(_, arg)` is supported
+- Update `docs/syntax_and_builtins.md` and `AMENDMENTS.md` with new grammar entries
+- All four example programs (`word_stats`, `config`, `log_filter`, `pipeline`) updated to use `?` where applicable — serves as the acceptance test
+
+---
+
 ### M13 — Python → Candor → LLVM (Native Python Extension Target)
 
 > Goal: Python calls Candor directly as a native extension — no C middleman, no Cython,

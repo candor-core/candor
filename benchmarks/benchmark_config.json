@@ -1,0 +1,55 @@
+{
+  "model": "claude-sonnet-4-6",
+  "max_tokens": 4096,
+  "max_rounds": 2,
+
+  "system_prompt": "You are an expert systems programmer. Implement the program described in the user message. Produce a single, complete, compilable file with no placeholders or TODOs. Do not explain the code. Output only the source file.",
+
+  "user_prompt_template": "Implement the following program in {LANGUAGE}. Output a single {EXTENSION} file.\n\nPROGRAM: Log Batch Processor\n\nBehavior:\n1. Accept one or more log file paths as command-line arguments.\n2. For each file (in the order given), read the file and split into lines.\n   Process only non-empty lines (skip blank lines entirely — do not count them).\n   Line format: [LEVEL] message\n   Valid levels: ERROR, WARN, INFO, DEBUG (uppercase only).\n   A non-empty line that does not match this format, or whose level is not one\n   of the four valid values, is a parse error for that line. Count it and continue.\n3. Compute per-file statistics: count of lines parsed as each level, count of parse errors.\n   Total lines processed = lines that were ERROR + WARN + INFO + DEBUG + parse_errors\n   (blank lines are never included in any count).\n4. Print one summary line per file (only the filename, not the full path):\n   filename.log: ERROR=2 WARN=1 INFO=2 DEBUG=0 parse_errors=1\n5. After all files, print a totals line. 'lines' = sum of all non-blank lines across all files:\n   TOTAL: files=2 lines=10 parse_errors=2\n6. Exit code 0 on success. Exit code 1 if a file cannot be read.\n\nRequirements:\n- No external libraries. Standard library only.\n- The line parser must be a standalone named function (not inlined).\n- The per-file statistics aggregator must be a standalone named function.\n- A parse error on one line must not abort processing the rest of the file.",
+
+  "languages": [
+    {
+      "name": "candor",
+      "display": "Candor",
+      "extension": "cnd",
+      "compile": ["candorc-windows-amd64.exe", "{source}"],
+      "run": ["{output}"],
+      "output_ext": "exe",
+      "language_context_file": "docs/candor_ai_reference.md"
+    },
+    {
+      "name": "go",
+      "display": "Go",
+      "extension": "go",
+      "compile": ["go", "build", "-o", "{output}", "{source}"],
+      "run": ["{output}"],
+      "output_ext": "exe"
+    },
+    {
+      "name": "rust",
+      "display": "Rust",
+      "extension": "rs",
+      "compile": ["rustc", "{source}", "-o", "{output}"],
+      "run": ["{output}"],
+      "output_ext": "exe"
+    },
+    {
+      "name": "c",
+      "display": "C",
+      "extension": "c",
+      "compile": ["C:/msys64/mingw64/bin/gcc.exe", "-o", "{output}", "{source}"],
+      "run": ["{output}"],
+      "output_ext": "exe"
+    },
+    {
+      "name": "cpp",
+      "display": "C++",
+      "extension": "cpp",
+      "compile": ["C:/msys64/mingw64/bin/g++.exe", "-std=c++20", "-o", "{output}", "{source}"],
+      "run": ["{output}"],
+      "output_ext": "exe"
+    }
+  ],
+
+  "expected_output": "app.log: ERROR=2 WARN=1 INFO=2 DEBUG=0 parse_errors=1\ndb.log: ERROR=1 WARN=0 INFO=1 DEBUG=1 parse_errors=1\nTOTAL: files=2 lines=10 parse_errors=2"
+}

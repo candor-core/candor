@@ -1,0 +1,32 @@
+{
+  "language": "candor",
+  "display": "Candor",
+  "model": "claude-sonnet-4-6",
+  "run_id": "20260421_232416",
+  "timestamp": "2026-04-21T23:24:16.660874",
+  "rounds": [
+    {
+      "round": 1,
+      "input_tokens": 360,
+      "output_tokens": 1257,
+      "compiles": false,
+      "correct": false,
+      "compile_stderr": "candorc: D:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_232416_r1.cnd:22:21: error: unexpected character '\\''\n  22 |   if (trimmed[0] != '[') {\n     |                     ^",
+      "actual_output": ""
+    },
+    {
+      "round": 2,
+      "input_tokens": 1716,
+      "output_tokens": 1153,
+      "compiles": false,
+      "correct": false,
+      "compile_stderr": "candorc: D:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_232416_r2.cnd:1:1: expected declaration (fn, struct, enum, module, use, extern, const, impl, trait, or cap), got Ident \"import\"",
+      "actual_output": ""
+    }
+  ],
+  "total_input_tokens": 2076,
+  "total_output_tokens": 2410,
+  "total_tokens": 4486,
+  "final_compiles": false,
+  "final_correct": false
+}

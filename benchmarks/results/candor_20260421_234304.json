@@ -1,0 +1,24 @@
+{
+  "language": "candor",
+  "display": "Candor",
+  "model": "claude-sonnet-4-6",
+  "run_id": "20260421_234304",
+  "timestamp": "2026-04-21T23:43:04.883022",
+  "reference_tokens_est": 2319,
+  "rounds": [
+    {
+      "round": 1,
+      "input_tokens": 3685,
+      "output_tokens": 1665,
+      "compiles": true,
+      "correct": true,
+      "compile_stderr": "",
+      "actual_output": ""
+    }
+  ],
+  "total_input_tokens": 3685,
+  "total_output_tokens": 1665,
+  "total_tokens": 5350,
+  "final_compiles": true,
+  "final_correct": true
+}

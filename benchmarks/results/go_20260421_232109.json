@@ -1,0 +1,32 @@
+{
+  "language": "go",
+  "display": "Go",
+  "model": "claude-sonnet-4-6",
+  "run_id": "20260421_232109",
+  "timestamp": "2026-04-21T23:21:43.771188",
+  "rounds": [
+    {
+      "round": 1,
+      "input_tokens": 357,
+      "output_tokens": 1042,
+      "compiles": false,
+      "correct": false,
+      "compile_stderr": "benchmarks\\results\\go_20260421_232109_r1.go:1:1: expected 'package', found ``",
+      "actual_output": ""
+    },
+    {
+      "round": 2,
+      "input_tokens": 1457,
+      "output_tokens": 1042,
+      "compiles": false,
+      "correct": false,
+      "compile_stderr": "benchmarks\\results\\go_20260421_232109_r2.go:1:1: expected 'package', found ``",
+      "actual_output": ""
+    }
+  ],
+  "total_input_tokens": 1814,
+  "total_output_tokens": 2084,
+  "total_tokens": 3898,
+  "final_compiles": false,
+  "final_correct": false
+}

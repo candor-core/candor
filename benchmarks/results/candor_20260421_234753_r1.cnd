@@ -1,0 +1,143 @@
+fn read_log_file(path: str) -> result<str, str> effects(io) {
+    read_file(path)
+}
+
+struct ParsedLine {
+    level: str
+    message: str
+}
+
+struct FileStats {
+    filename: str
+    error_count: i64
+    warn_count: i64
+    info_count: i64
+    debug_count: i64
+    parse_errors: i64
+}
+
+fn parse_line(line: str) -> option<ParsedLine> pure {
+    let n = str_len(line)
+    if n == 0 { return none }
+    if str_byte(line, 0) != 91 { return none }
+    let close = str_find(line, "]", 1) must {
+        some(i) => i
+        none    => return none
+    }
+    let level = str_substr(line, 1, close - 1)
+    if not str_eq(level, "ERROR") {
+        if not str_eq(level, "WARN") {
+            if not str_eq(level, "INFO") {
+                if not str_eq(level, "DEBUG") {
+                    return none
+                }
+            }
+        }
+    }
+    let rest_start = close + 1
+    let rest_len = n - rest_start
+    let msg = str_trim(str_substr(line, rest_start, rest_len))
+    some(ParsedLine{ level: level, message: msg })
+}
+
+fn path_basename(path: str) -> str pure {
+    let n = str_len(path)
+    let mut last_sep: i64 = -1
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let c = str_byte(path, i) as i64
+        if c == 47 or c == 92 { last_sep = i }
+        i = i + 1
+    }
+    if last_sep < 0 { return path }
+    str_substr(path, last_sep + 1, n - last_sep - 1)
+}
+
+fn aggregate_file(path: str) -> result<FileStats, str> effects(io) {
+    let raw = read_log_file(path) must {
+        ok(s)  => s
+        err(e) => return err(e)
+    }
+    let fname = path_basename(path)
+    let lines = str_split(raw, "\n")
+    let n = vec_len(lines) as i64
+    let mut err_count: i64 = 0
+    let mut warn_count: i64 = 0
+    let mut info_count: i64 = 0
+    let mut debug_count: i64 = 0
+    let mut parse_err_count: i64 = 0
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let line = str_trim(lines[i as u64])
+        if str_len(line) == 0 {
+            i = i + 1
+        } else {
+            match parse_line(line) {
+                some(p) => {
+                    if str_eq(p.level, "ERROR") {
+                        err_count = err_count + 1
+                    } else {
+                        if str_eq(p.level, "WARN") {
+                            warn_count = warn_count + 1
+                        } else {
+                            if str_eq(p.level, "INFO") {
+                                info_count = info_count + 1
+                            } else {
+                                debug_count = debug_count + 1
+                            }
+                        }
+                    }
+                }
+                none => {
+                    parse_err_count = parse_err_count + 1
+                }
+            }
+            i = i + 1
+        }
+    }
+    ok(FileStats{
+        filename: fname,
+        error_count: err_count,
+        warn_count: warn_count,
+        info_count: info_count,
+        debug_count: debug_count,
+        parse_errors: parse_err_count
+    })
+}
+
+fn main() -> unit effects(io, sys) {
+    let args = os_args()
+    let n_args = vec_len(args) as i64
+    if n_args < 2 {
+        print("usage: logbatch <file1> [file2 ...]")
+        return unit
+    }
+    let mut total_files: i64 = 0
+    let mut total_lines: i64 = 0
+    let mut total_parse_errors: i64 = 0
+    let mut i: i64 = 1
+    loop {
+        if i >= n_args { break }
+        let path = args[i as u64]
+        match aggregate_file(path) {
+            ok(s) => {
+                let file_lines = s.error_count + s.warn_count + s.info_count + s.debug_count + s.parse_errors
+                let out = str_concat(s.filename, str_concat(": ERROR=", str_concat(int_to_str(s.error_count), str_concat(" WARN=", str_concat(int_to_str(s.warn_count), str_concat(" INFO=", str_concat(int_to_str(s.info_count), str_concat(" DEBUG=", str_concat(int_to_str(s.debug_count), str_concat(" parse_errors=", int_to_str(s.parse_errors)))))))))))
+                print(out)
+                total_files = total_files + 1
+                total_lines = total_lines + file_lines
+                total_parse_errors = total_parse_errors + s.parse_errors
+            }
+            err(e) => {
+                print(str_concat("error reading file: ", e))
+                return unit
+            }
+        }
+        i = i + 1
+    }
+    let total_out = str_concat("TOTAL: files=", str_concat(int_to_str(total_files), str_concat(" lines=", str_concat(int_to_str(total_lines), str_concat(" parse_errors=", int_to_str(total_parse_errors))))))
+    print(total_out)
+    return unit
+}

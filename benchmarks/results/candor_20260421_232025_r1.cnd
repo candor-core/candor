@@ -1,0 +1,165 @@
+```candor
+import io
+import fs
+import process
+import array
+import string
+
+fn parseLine(line) {
+  var result = { level: nil, message: nil, parseError: false }
+
+  if string.length(line) == 0 {
+    result.parseError = true
+    return result
+  }
+
+  if string.charAt(line, 0) != '[' {
+    result.parseError = true
+    return result
+  }
+
+  var closeIdx = string.indexOf(line, ']')
+  if closeIdx < 0 {
+    result.parseError = true
+    return result
+  }
+
+  var level = string.slice(line, 1, closeIdx)
+  var rest = string.slice(line, closeIdx + 1, string.length(line))
+
+  if level != 'ERROR' && level != 'WARN' && level != 'INFO' && level != 'DEBUG' {
+    result.parseError = true
+    return result
+  }
+
+  result.level = level
+  result.message = rest
+  return result
+}
+
+fn aggregateFile(filepath) {
+  var stats = {
+    errorCount: 0,
+    warnCount: 0,
+    infoCount: 0,
+    debugCount: 0,
+    parseErrors: 0,
+    totalLines: 0
+  }
+
+  var content = nil
+  var readOk = true
+
+  content = fs.readFile(filepath)
+
+  if content == nil {
+    return stats
+  }
+
+  var lines = string.split(content, '\n')
+  var i = 0
+  var len = array.length(lines)
+
+  while i < len {
+    var line = array.get(lines, i)
+    line = string.trim(line)
+
+    if string.length(line) > 0 {
+      stats.totalLines = stats.totalLines + 1
+      var parsed = parseLine(line)
+      if parsed.parseError {
+        stats.parseErrors = stats.parseErrors + 1
+      } else {
+        if parsed.level == 'ERROR' {
+          stats.errorCount = stats.errorCount + 1
+        }
+        if parsed.level == 'WARN' {
+          stats.warnCount = stats.warnCount + 1
+        }
+        if parsed.level == 'INFO' {
+          stats.infoCount = stats.infoCount + 1
+        }
+        if parsed.level == 'DEBUG' {
+          stats.debugCount = stats.debugCount + 1
+        }
+      }
+    }
+
+    i = i + 1
+  }
+
+  return stats
+}
+
+fn main() {
+  var args = process.argv()
+  var argLen = array.length(args)
+
+  if argLen < 3 {
+    io.print('Usage: program <input_directory>')
+    process.exit(1)
+  }
+
+  var dirPath = array.get(args, 2)
+
+  var entries = nil
+  entries = fs.readDir(dirPath)
+
+  if entries == nil {
+    io.print('Error: cannot read directory: ' + dirPath)
+    process.exit(1)
+  }
+
+  var logFiles = array.create()
+  var i = 0
+  var entryLen = array.length(entries)
+
+  while i < entryLen {
+    var entry = array.get(entries, i)
+    var entryName = ''
+
+    if typeof(entry) == 'string' {
+      entryName = entry
+    } else {
+      entryName = entry.name
+    }
+
+    var nameLen = string.length(entryName)
+    if nameLen >= 4 {
+      var ext = string.slice(entryName, nameLen - 4, nameLen)
+      if ext == '.log' {
+        array.push(logFiles, entryName)
+      }
+    }
+
+    i = i + 1
+  }
+
+  logFiles = array.sort(logFiles)
+
+  var totalFiles = array.length(logFiles)
+  var totalLines = 0
+  var totalParseErrors = 0
+
+  i = 0
+  while i < totalFiles {
+    var filename = array.get(logFiles, i)
+    var filepath = dirPath + '/' + filename
+
+    var stats = aggregateFile(filepath)
+
+    totalLines = totalLines + stats.totalLines
+    totalParseErrors = totalParseErrors + stats.parseErrors
+
+    io.print(filename + ': ERROR=' + stats.errorCount + ' WARN=' + stats.warnCount + ' INFO=' + stats.infoCount + ' DEBUG=' + stats.debugCount + ' parse_errors=' + stats.parseErrors)
+
+    i = i + 1
+  }
+
+  io.print('TOTAL: files=' + totalFiles + ' lines=' + totalLines + ' parse_errors=' + totalParseErrors)
+
+  process.exit(0)
+}
+
+main()
+```

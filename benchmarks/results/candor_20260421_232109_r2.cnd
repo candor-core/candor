@@ -1,0 +1,199 @@
+```
+import fs
+import path
+import process
+
+fn parseLine(line) {
+  result = { level: nil, message: nil, parseError: false }
+
+  if line == nil {
+    result.parseError = true
+    return result
+  }
+
+  if line.length == 0 {
+    result.parseError = true
+    return result
+  }
+
+  if line[0] != "[" {
+    result.parseError = true
+    return result
+  }
+
+  closeBracket = -1
+  i = 1
+  while i < line.length {
+    if line[i] == "]" {
+      closeBracket = i
+      break
+    }
+    i = i + 1
+  }
+
+  if closeBracket == -1 {
+    result.parseError = true
+    return result
+  }
+
+  level = line.slice(1, closeBracket)
+
+  if level != "ERROR" && level != "WARN" && level != "INFO" && level != "DEBUG" {
+    result.parseError = true
+    return result
+  }
+
+  result.level = level
+
+  msgStart = closeBracket + 1
+  if msgStart < line.length && line[msgStart] == " " {
+    msgStart = msgStart + 1
+  }
+  result.message = line.slice(msgStart, line.length)
+
+  return result
+}
+
+fn aggregateFileStats(lines) {
+  stats = {
+    ERROR: 0,
+    WARN: 0,
+    INFO: 0,
+    DEBUG: 0,
+    parseErrors: 0,
+    totalLines: 0
+  }
+
+  i = 0
+  while i < lines.length {
+    line = lines[i]
+    trimmed = line.trim()
+    if trimmed.length > 0 {
+      stats.totalLines = stats.totalLines + 1
+      parsed = parseLine(trimmed)
+      if parsed.parseError {
+        stats.parseErrors = stats.parseErrors + 1
+      } else {
+        if parsed.level == "ERROR" {
+          stats.ERROR = stats.ERROR + 1
+        } else if parsed.level == "WARN" {
+          stats.WARN = stats.WARN + 1
+        } else if parsed.level == "INFO" {
+          stats.INFO = stats.INFO + 1
+        } else if parsed.level == "DEBUG" {
+          stats.DEBUG = stats.DEBUG + 1
+        }
+      }
+    }
+    i = i + 1
+  }
+
+  return stats
+}
+
+fn main() {
+  args = process.argv
+
+  if args.length < 3 {
+    process.stderr.write("Usage: program <input-directory>\n")
+    process.exit(1)
+    return
+  }
+
+  inputDir = args[2]
+
+  dirEntries = nil
+  readError = false
+
+  try {
+    dirEntries = fs.readdirSync(inputDir)
+  } catch e {
+    readError = true
+  }
+
+  if readError {
+    process.stderr.write("Error: cannot read directory: " + inputDir + "\n")
+    process.exit(1)
+    return
+  }
+
+  if dirEntries == nil {
+    process.stderr.write("Error: cannot read directory: " + inputDir + "\n")
+    process.exit(1)
+    return
+  }
+
+  logFiles = []
+  i = 0
+  while i < dirEntries.length {
+    entry = dirEntries[i]
+    if entry.length > 4 {
+      ext = entry.slice(entry.length - 4, entry.length)
+      if ext == ".log" {
+        logFiles.push(entry)
+      }
+    }
+    i = i + 1
+  }
+
+  logFiles.sort()
+
+  totalFiles = logFiles.length
+  totalLines = 0
+  totalParseErrors = 0
+
+  j = 0
+  while j < logFiles.length {
+    filename = logFiles[j]
+    filePath = path.join(inputDir, filename)
+
+    fileContent = nil
+    fileError = false
+
+    try {
+      fileContent = fs.readFileSync(filePath, "utf8")
+    } catch e {
+      fileError = true
+    }
+
+    if fileError {
+      process.stdout.write(filename + ": ERROR=0 WARN=0 INFO=0 DEBUG=0 parse_errors=0\n")
+      j = j + 1
+      continue
+    }
+
+    if fileContent == nil {
+      process.stdout.write(filename + ": ERROR=0 WARN=0 INFO=0 DEBUG=0 parse_errors=0\n")
+      j = j + 1
+      continue
+    }
+
+    lines = fileContent.split("\n")
+
+    stats = aggregateFileStats(lines)
+
+    totalLines = totalLines + stats.totalLines
+    totalParseErrors = totalParseErrors + stats.parseErrors
+
+    process.stdout.write(
+      filename + ": ERROR=" + stats.ERROR +
+      " WARN=" + stats.WARN +
+      " INFO=" + stats.INFO +
+      " DEBUG=" + stats.DEBUG +
+      " parse_errors=" + stats.parseErrors + "\n"
+    )
+
+    j = j + 1
+  }
+
+  process.stdout.write(
+    "TOTAL: files=" + totalFiles +
+    " lines=" + totalLines +
+    " parse_errors=" + totalParseErrors + "\n"
+  )
+
+  process.exit(0)
+}
+
+main()
+```

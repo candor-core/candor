@@ -1,0 +1,185 @@
+struct LineResult {
+    level: str,
+    message: str,
+    is_error: bool,
+}
+
+struct FileStats {
+    filename: str,
+    error_count: i64,
+    warn_count: i64,
+    info_count: i64,
+    debug_count: i64,
+    parse_errors: i64,
+    total_lines: i64,
+}
+
+fn parse_line(line: str) -> LineResult pure {
+    let trimmed = str_trim(line);
+    let tlen = str_len(trimmed);
+    if tlen == 0 {
+        return LineResult { level: "", message: "", is_error: true };
+    }
+    if str_byte(trimmed, 0i64) != 91u8 {
+        return LineResult { level: "", message: trimmed, is_error: true };
+    }
+    let close_opt = str_find(trimmed, "]", 1i64);
+    let close_idx = close_opt must { some(v) => v  none => return LineResult { level: "", message: trimmed, is_error: true } };
+    let level = str_substr(trimmed, 1i64, close_idx - 1i64);
+    let matched = false;
+    if str_eq(level, "ERROR") {
+        matched = true;
+    }
+    if str_eq(level, "WARN") {
+        matched = true;
+    }
+    if str_eq(level, "INFO") {
+        matched = true;
+    }
+    if str_eq(level, "DEBUG") {
+        matched = true;
+    }
+    if !matched {
+        return LineResult { level: "", message: trimmed, is_error: true };
+    }
+    let rest_start = close_idx + 1i64;
+    let rest_len = tlen - rest_start;
+    let message = "";
+    if rest_len > 0i64 {
+        message = str_trim(str_substr(trimmed, rest_start, rest_len));
+    }
+    LineResult { level: level, message: message, is_error: false }
+}
+
+fn aggregate_file(path: str, filename: str) -> result<FileStats, str> effects(io) {
+    let contents = match read_file(path) {
+        ok(v) => v
+        err(e) => return err(e)
+    };
+    let stats = FileStats {
+        filename: filename,
+        error_count: 0i64,
+        warn_count: 0i64,
+        info_count: 0i64,
+        debug_count: 0i64,
+        parse_errors: 0i64,
+        total_lines: 0i64,
+    };
+    let lines = str_split(contents, "\n");
+    let num_lines = vec_len(lines);
+    let i = 0u64;
+    loop {
+        if i >= num_lines {
+            break;
+        }
+        let line = lines[i];
+        let trimmed = str_trim(line);
+        if str_len(trimmed) > 0 {
+            stats.total_lines = stats.total_lines + 1i64;
+            let parsed = parse_line(trimmed);
+            if parsed.is_error {
+                stats.parse_errors = stats.parse_errors + 1i64;
+            }
+            if !parsed.is_error {
+                if str_eq(parsed.level, "ERROR") {
+                    stats.error_count = stats.error_count + 1i64;
+                }
+                if str_eq(parsed.level, "WARN") {
+                    stats.warn_count = stats.warn_count + 1i64;
+                }
+                if str_eq(parsed.level, "INFO") {
+                    stats.info_count = stats.info_count + 1i64;
+                }
+                if str_eq(parsed.level, "DEBUG") {
+                    stats.debug_count = stats.debug_count + 1i64;
+                }
+            }
+        }
+        i = i + 1u64;
+    }
+    ok(stats)
+}
+
+fn basename(path: str) -> str pure {
+    let plen = str_len(path);
+    if plen == 0 {
+        return path;
+    }
+    let last_slash = -1i64;
+    let i = 0i64;
+    loop {
+        if i >= plen {
+            break;
+        }
+        let b = str_byte(path, i);
+        if b == 47u8 {
+            last_slash = i;
+        }
+        if b == 92u8 {
+            last_slash = i;
+        }
+        i = i + 1i64;
+    }
+    if last_slash < 0i64 {
+        return path;
+    }
+    let start = last_slash + 1i64;
+    let remaining = plen - start;
+    if remaining <= 0i64 {
+        return path;
+    }
+    str_substr(path, start, remaining)
+}
+
+fn main() -> unit effects(io) {
+    let args = os_args();
+    let num_args = vec_len(args);
+    if num_args <= 1u64 {
+        print("Usage: logbatch <file1> [file2 ...]");
+        return unit;
+    }
+    let total_files = 0i64;
+    let total_lines = 0i64;
+    let total_parse_errors = 0i64;
+    let i = 1u64;
+    loop {
+        if i >= num_args {
+            break;
+        }
+        let path = args[i];
+        let fname = basename(path);
+        let stats_result = aggregate_file(path, fname);
+        match stats_result {
+            ok(stats) => {
+                let line = str_concat(stats.filename, ": ERROR=");
+                line = str_concat(line, int_to_str(stats.error_count));
+                line = str_concat(line, " WARN=");
+                line = str_concat(line, int_to_str(stats.warn_count));
+                line = str_concat(line, " INFO=");
+                line = str_concat(line, int_to_str(stats.info_count));
+                line = str_concat(line, " DEBUG=");
+                line = str_concat(line, int_to_str(stats.debug_count));
+                line = str_concat(line, " parse_errors=");
+                line = str_concat(line, int_to_str(stats.parse_errors));
+                print(line);
+                total_files = total_files + 1i64;
+                total_lines = total_lines + stats.total_lines;
+                total_parse_errors = total_parse_errors + stats.parse_errors;
+            }
+            err(e) => {
+                let msg = str_concat("Error reading file: ", path);
+                msg = str_concat(msg, ": ");
+                msg = str_concat(msg, e);
+                print(msg);
+                return unit;
+            }
+        }
+        i = i + 1u64;
+    }
+    let summary = str_concat("TOTAL: files=", int_to_str(total_files));
+    summary = str_concat(summary, " lines=");
+    summary = str_concat(summary, int_to_str(total_lines));
+    summary = str_concat(summary, " parse_errors=");
+    summary = str_concat(summary, int_to_str(total_parse_errors));
+    print(summary);
+}

@@ -1,0 +1,129 @@
+[
+  {
+    "language": "candor",
+    "display": "Candor",
+    "model": "claude-sonnet-4-6",
+    "run_id": "20260422_000227",
+    "timestamp": "2026-04-22T00:02:27.160654",
+    "reference_tokens_est": 2642,
+    "rounds": [
+      {
+        "round": 1,
+        "input_tokens": 4146,
+        "output_tokens": 1395,
+        "compiles": true,
+        "correct": true,
+        "semantics": {
+          "passed": true,
+          "pure_fns": 3,
+          "effects_fns": 2,
+          "must_blocks": 2,
+          "result_types": 1,
+          "option_types": 1
+        },
+        "compile_stderr": "",
+        "actual_output": ""
+      }
+    ],
+    "total_input_tokens": 4146,
+    "total_output_tokens": 1395,
+    "total_tokens": 5541,
+    "final_compiles": true,
+    "final_correct": true
+  },
+  {
+    "language": "go",
+    "display": "Go",
+    "model": "claude-sonnet-4-6",
+    "run_id": "20260422_000227",
+    "timestamp": "2026-04-22T00:02:45.606878",
+    "reference_tokens_est": 0,
+    "rounds": [
+      {
+        "round": 1,
+        "input_tokens": 476,
+        "output_tokens": 919,
+        "compiles": true,
+        "correct": true,
+        "semantics": {},
+        "compile_stderr": "",
+        "actual_output": ""
+      }
+    ],
+    "total_input_tokens": 476,
+    "total_output_tokens": 919,
+    "total_tokens": 1395,
+    "final_compiles": true,
+    "final_correct": true
+  },
+  {
+    "language": "c",
+    "display": "C",
+    "model": "claude-sonnet-4-6",
+    "run_id": "20260422_000227",
+    "timestamp": "2026-04-22T00:02:57.020969",
+    "reference_tokens_est": 0,
+    "rounds": [
+      {
+        "round": 1,
+        "input_tokens": 476,
+        "output_tokens": 1148,
+        "compiles": false,
+        "correct": false,
+        "semantics": {},
+        "compile_stderr": "",
+        "actual_output": ""
+      },
+      {
+        "round": 2,
+        "input_tokens": 1658,
+        "output_tokens": 1173,
+        "compiles": false,
+        "correct": false,
+        "semantics": {},
+        "compile_stderr": "",
+        "actual_output": ""
+      }
+    ],
+    "total_input_tokens": 2134,
+    "total_output_tokens": 2321,
+    "total_tokens": 4455,
+    "final_compiles": false,
+    "final_correct": false
+  },
+  {
+    "language": "cpp",
+    "display": "C++",
+    "model": "claude-sonnet-4-6",
+    "run_id": "20260422_000227",
+    "timestamp": "2026-04-22T00:03:20.326998",
+    "reference_tokens_est": 0,
+    "rounds": [
+      {
+        "round": 1,
+        "input_tokens": 477,
+        "output_tokens": 1144,
+        "compiles": false,
+        "correct": false,
+        "semantics": {},
+        "compile_stderr": "",
+        "actual_output": ""
+      },
+      {
+        "round": 2,
+        "input_tokens": 1655,
+        "output_tokens": 1215,
+        "compiles": false,
+        "correct": false,
+        "semantics": {},
+        "compile_stderr": "",
+        "actual_output": ""
+      }
+    ],
+    "total_input_tokens": 2132,
+    "total_output_tokens": 2359,
+    "total_tokens": 4491,
+    "final_compiles": false,
+    "final_correct": false
+  }
+]

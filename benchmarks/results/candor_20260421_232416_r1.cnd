@@ -1,0 +1,168 @@
+// Log Batch Processor
+// Compiled with Candor (cnd)
+
+import fs
+import path
+import sys
+
+// ParseResult structure fields by index:
+// 0: level (string or null)
+// 1: message (string)
+// 2: isError (boolean)
+
+fn parseLine(line) {
+  // Trim trailing whitespace/newline
+  var trimmed = line.trim()
+
+  if (trimmed.length == 0) {
+    return { level: nil, message: "", isError: false, isEmpty: true }
+  }
+
+  // Expect format: [LEVEL] message
+  if (trimmed[0] != '[') {
+    return { level: nil, message: trimmed, isError: true, isEmpty: false }
+  }
+
+  var closeBracket = trimmed.indexOf(']')
+  if (closeBracket == -1) {
+    return { level: nil, message: trimmed, isError: true, isEmpty: false }
+  }
+
+  var level = trimmed.slice(1, closeBracket)
+  var message = trimmed.slice(closeBracket + 1).trim()
+
+  var validLevels = ["ERROR", "WARN", "INFO", "DEBUG"]
+  var isValid = false
+  var i = 0
+  while (i < validLevels.length) {
+    if (validLevels[i] == level) {
+      isValid = true
+    }
+    i = i + 1
+  }
+
+  if (!isValid) {
+    return { level: nil, message: trimmed, isError: true, isEmpty: false }
+  }
+
+  return { level: level, message: message, isError: false, isEmpty: false }
+}
+
+fn aggregateFileStats(filePath) {
+  var stats = {
+    error: 0,
+    warn: 0,
+    info: 0,
+    debug: 0,
+    parseErrors: 0,
+    totalLines: 0
+  }
+
+  var content = ""
+  try {
+    content = fs.readFileSync(filePath, "utf8")
+  } catch (e) {
+    return stats
+  }
+
+  var lines = content.split("\n")
+  var i = 0
+  while (i < lines.length) {
+    var line = lines[i]
+    var result = parseLine(line)
+
+    if (!result.isEmpty) {
+      stats.totalLines = stats.totalLines + 1
+
+      if (result.isError) {
+        stats.parseErrors = stats.parseErrors + 1
+      } else {
+        if (result.level == "ERROR") {
+          stats.error = stats.error + 1
+        }
+        if (result.level == "WARN") {
+          stats.warn = stats.warn + 1
+        }
+        if (result.level == "INFO") {
+          stats.info = stats.info + 1
+        }
+        if (result.level == "DEBUG") {
+          stats.debug = stats.debug + 1
+        }
+      }
+    }
+
+    i = i + 1
+  }
+
+  return stats
+}
+
+fn main() {
+  var args = sys.argv()
+
+  // args[0] is the script name, args[1] is the first argument
+  if (args.length < 2) {
+    sys.stderr.write("Usage: logbatch <input_directory>\n")
+    sys.exit(1)
+  }
+
+  var dirPath = args[1]
+
+  var entries = nil
+  try {
+    entries = fs.readdirSync(dirPath)
+  } catch (e) {
+    sys.stderr.write("Error: cannot read directory: " + dirPath + "\n")
+    sys.exit(1)
+  }
+
+  // Filter only .log files
+  var logFiles = []
+  var i = 0
+  while (i < entries.length) {
+    var entry = entries[i]
+    if (entry.endsWith(".log")) {
+      logFiles.push(entry)
+    }
+    i = i + 1
+  }
+
+  // Sort filenames alphabetically
+  logFiles.sort()
+
+  var totalFiles = logFiles.length
+  var totalLines = 0
+  var totalParseErrors = 0
+
+  var j = 0
+  while (j < logFiles.length) {
+    var filename = logFiles[j]
+    var filePath = path.join(dirPath, filename)
+
+    var stats = aggregateFileStats(filePath)
+
+    totalLines = totalLines + stats.totalLines
+    totalParseErrors = totalParseErrors + stats.parseErrors
+
+    sys.stdout.write(
+      filename + ": ERROR=" + stats.error +
+      " WARN=" + stats.warn +
+      " INFO=" + stats.info +
+      " DEBUG=" + stats.debug +
+      " parse_errors=" + stats.parseErrors + "\n"
+    )
+
+    j = j + 1
+  }
+
+  sys.stdout.write(
+    "TOTAL: files=" + totalFiles +
+    " lines=" + totalLines +
+    " parse_errors=" + totalParseErrors + "\n"
+  )
+
+  sys.exit(0)
+}
+
+main()

@@ -1,0 +1,196 @@
+{
+  "_comment": "Candor tokenizer alignment benchmark. Each group tracks a design question. Comparisons show Verification Form vs Agent Form equivalents. Re-run when a major model ships.",
+
+  "groups": [
+
+    {
+      "name": "core_keywords",
+      "description": "Every keyword must be 1 token. If any goes multi-token in a future model, it becomes a candidate for renaming or Agent Form aliasing.",
+      "alert_if_above": 1,
+      "items": [
+        "fn", "let", "if", "else", "return", "pure", "match", "must",
+        "struct", "enum", "trait", "impl", "type", "use", "extern",
+        "effects", "requires", "ensures", "loop", "while", "for", "in",
+        "break", "continue", "true", "false", "ok", "err", "none", "some",
+        "ref", "refmut", "box", "arc", "bool", "str", "unit"
+      ]
+    },
+
+    {
+      "name": "numeric_types",
+      "description": "All integer/float types split as letter+number (2 tokens). This is fundamental BPE behavior — unlikely to change. Confirms that Agent Form type aliases (int, float, byte) save 1 token each.",
+      "items": [
+        "i8", "i16", "i32", "i64", "i128",
+        "u8", "u16", "u32", "u64", "u128",
+        "f16", "f32", "f64", "bf16"
+      ]
+    },
+
+    {
+      "name": "agent_form_type_aliases",
+      "description": "Agent Form candidates for single-token type aliases. These are 1-token words that could alias to their 2-token Candor equivalents in Agent Form only.",
+      "items": [
+        "int", "uint", "float", "byte", "char"
+      ]
+    },
+
+    {
+      "name": "operators",
+      "description": "Operators used in Candor syntax. 1-token operators are ideal. |> is 2 tokens — expected but still cheaper than nested calls. ?| is 2 tokens (error-transform variant of ?).",
+      "items": [
+        "->", "=>", "::", "?", "?|", "|>",
+        "{", "}", "(", ")", "<", ">", ",", ":", ";"
+      ]
+    },
+
+    {
+      "name": "effect_annotations",
+      "description": "Current Verification Form effect syntax vs proposed Agent Form shorthands. The savings are large: 4 tokens vs 1 token per effect declaration.",
+      "comparisons": [
+        {
+          "label": "single io effect",
+          "verification": "effects(io)",
+          "agent_form": "io"
+        },
+        {
+          "label": "single gpu effect",
+          "verification": "effects(gpu)",
+          "agent_form": "gpu"
+        },
+        {
+          "label": "single net effect",
+          "verification": "effects(net)",
+          "agent_form": "net"
+        },
+        {
+          "label": "single sys effect",
+          "verification": "effects(sys)",
+          "agent_form": "sys"
+        },
+        {
+          "label": "io + gpu combined",
+          "verification": "effects(io, gpu)",
+          "agent_form": "io gpu"
+        },
+        {
+          "label": "pure (already optimal — no Agent Form alias needed)",
+          "verification": "pure",
+          "agent_form": "pure"
+        }
+      ]
+    },
+
+    {
+      "name": "result_type_expressions",
+      "description": "Verification Form result<T,str> vs Agent Form ?T shorthand. The savings are 50-64% per return type annotation.",
+      "comparisons": [
+        {
+          "label": "result<Row, str>",
+          "verification": "result<Row, str>",
+          "agent_form": "?Row"
+        },
+        {
+          "label": "result<str, str>",
+          "verification": "result<str, str>",
+          "agent_form": "?str"
+        },
+        {
+          "label": "result<i64, str>",
+          "verification": "result<i64, str>",
+          "agent_form": "?i64"
+        },
+        {
+          "label": "result<Summary, str>",
+          "verification": "result<Summary, str>",
+          "agent_form": "?Summary"
+        },
+        {
+          "label": "result<Config, str>",
+          "verification": "result<Config, str>",
+          "agent_form": "?Config"
+        }
+      ]
+    },
+
+    {
+      "name": "full_return_signatures",
+      "description": "Complete return type + annotation fragments — the most common signature suffix patterns. Combines result type + effect savings.",
+      "comparisons": [
+        {
+          "label": "pure result fn (common: parse, validate)",
+          "verification": "-> result<Row, str> pure",
+          "agent_form": "-> ?Row pure"
+        },
+        {
+          "label": "effectful result fn (common: load, run, write)",
+          "verification": "-> result<str, str> effects(io)",
+          "agent_form": "-> ?str io"
+        },
+        {
+          "label": "effectful with named return type",
+          "verification": "-> result<Summary, str> effects(io)",
+          "agent_form": "-> ?Summary io"
+        },
+        {
+          "label": "pure non-failing fn",
+          "verification": "-> i64 pure",
+          "agent_form": "-> int pure"
+        },
+        {
+          "label": "unit effectful fn",
+          "verification": "-> unit effects(io)",
+          "agent_form": "-> unit io"
+        }
+      ]
+    },
+
+    {
+      "name": "identifier_splitting",
+      "description": "How snake_case function names split. Always: word + underscore + word = 3 tokens minimum. CamelCase struct names vary: short names (Row, Config) are 1 token; compound names (LogEntry) are 2. This is intrinsic to BPE and unlikely to improve.",
+      "items": [
+        "parse_row", "parse_line", "run_pipeline", "count_lines",
+        "load_config", "filter_lines", "validate_row", "compute_stats",
+        "Row", "Summary", "Config", "LogEntry", "ParseResult", "LogLevel"
+      ]
+    },
+
+    {
+      "name": "collection_types",
+      "description": "Container types with type parameters. Each angle bracket and comma is 1 token. The type parameter itself adds its token count.",
+      "items": [
+        "vec<i64>", "vec<str>", "vec<Row>",
+        "option<str>", "option<Row>",
+        "map<str, i64>",
+        "ref<T>", "refmut<T>", "box<T>", "arc<T>"
+      ]
+    },
+
+    {
+      "name": "refmut_agent_form",
+      "description": "refmut is 3 tokens — the only core keyword that fails the 1-token test. Agent Form alias: mut<T> = 4 tokens vs refmut<T> = 6 tokens (33% savings). Re-check on each new model to see if this changes.",
+      "alert_if_above": 1,
+      "comparisons": [
+        {
+          "label": "mutable reference type",
+          "verification": "refmut<T>",
+          "agent_form": "mut<T>"
+        },
+        {
+          "label": "mutable reference in parameter (with name)",
+          "verification": "data: refmut<Row>",
+          "agent_form": "data: mut<Row>"
+        }
+      ]
+    },
+
+    {
+      "name": "future_keywords",
+      "description": "Keywords being considered for M14 and beyond. All should be 1 token before committing to them as language keywords.",
+      "alert_if_above": 1,
+      "items": [
+        "yield", "await", "async", "where", "with",
+        "move", "copy", "pin", "weak", "task", "spawn"
+      ]
+    }
+  ]
+}

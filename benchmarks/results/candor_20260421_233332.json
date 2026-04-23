@@ -1,0 +1,32 @@
+{
+  "language": "candor",
+  "display": "Candor",
+  "model": "claude-sonnet-4-6",
+  "run_id": "20260421_233332",
+  "timestamp": "2026-04-21T23:33:32.672257",
+  "rounds": [
+    {
+      "round": 1,
+      "input_tokens": 3412,
+      "output_tokens": 1773,
+      "compiles": true,
+      "correct": false,
+      "compile_stderr": "",
+      "actual_output": "D:\\SWC\\CandorSWC\\benchmarks\\test_logs\\app.log: ERROR=2 WARN=1 INFO=2 DEBUG=0 parse_errors=1\nD:\\SWC\\CandorSWC\\benchmarks\\test_logs\\db.log: ERROR=1 WARN=0 INFO=1 DEBUG=1 parse_errors=1\nTOTAL: files=2 lines=10 parse_errors=2"
+    },
+    {
+      "round": 2,
+      "input_tokens": 5398,
+      "output_tokens": 1837,
+      "compiles": false,
+      "correct": false,
+      "compile_stderr": "candorc: D:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_233332_r2.cnd:1:17: error: unexpected character '`'\n   1 | The issue is in `extract_filename` \u00e2\u20ac\u201d it only checks for `/` (ASCII 47) but not `\\` (ASCII 92) which is the Windows path separator. Fix it to handle both.\n     |                 ^",
+      "actual_output": ""
+    }
+  ],
+  "total_input_tokens": 8810,
+  "total_output_tokens": 3610,
+  "total_tokens": 12420,
+  "final_compiles": false,
+  "final_correct": false
+}

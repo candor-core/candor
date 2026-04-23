@@ -1,0 +1,122 @@
+fn path_basename(path: str) -> str pure {
+    let n = str_len(path)
+    let mut last_sep: i64 = -1
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let c = str_byte(path, i) as i64
+        if c == 47 or c == 92 { last_sep = i }
+        i = i + 1
+    }
+    if last_sep < 0 { return path }
+    str_substr(path, last_sep + 1, n - last_sep - 1)
+}
+
+struct ParsedLine {
+    level: str
+    message: str
+}
+
+fn parse_line(line: str) -> option<ParsedLine> pure {
+    let n = str_len(line)
+    if n == 0 { return none }
+    if str_byte(line, 0) != 91 { return none }
+    let close = str_find(line, "]", 1) must {
+        some(i) => i
+        none    => return none
+    }
+    let level = str_substr(line, 1, close - 1)
+    if not str_eq(level, "ERROR") and not str_eq(level, "WARN") and not str_eq(level, "INFO") and not str_eq(level, "DEBUG") {
+        return none
+    }
+    let rest_start = close + 1
+    let rest_len = n - rest_start
+    let msg = str_trim(str_substr(line, rest_start, rest_len))
+    some(ParsedLine{ level: level, message: msg })
+}
+
+struct FileStats {
+    name: str
+    errors: i64
+    warns: i64
+    infos: i64
+    debugs: i64
+    parse_errors: i64
+}
+
+fn compute_stats(filename: str, lines: vec<str>) -> FileStats pure {
+    let mut errors: i64 = 0
+    let mut warns: i64 = 0
+    let mut infos: i64 = 0
+    let mut debugs: i64 = 0
+    let mut parse_errs: i64 = 0
+    let n = vec_len(lines) as i64
+    let mut i: i64 = 0
+    loop {
+        if i >= n { break }
+        let line = str_trim(lines[i as u64])
+        if str_len(line) != 0 {
+            match parse_line(line) {
+                some(p) => {
+                    if str_eq(p.level, "ERROR") { errors = errors + 1 }
+                    if str_eq(p.level, "WARN") { warns = warns + 1 }
+                    if str_eq(p.level, "INFO") { infos = infos + 1 }
+                    if str_eq(p.level, "DEBUG") { debugs = debugs + 1 }
+                }
+                none => { parse_errs = parse_errs + 1 }
+            }
+        }
+        i = i + 1
+    }
+    FileStats{ name: filename, errors: errors, warns: warns, infos: infos, debugs: debugs, parse_errors: parse_errs }
+}
+
+fn read_log(path: str) -> result<str, str> effects(io) {
+    read_file(path)
+}
+
+fn main() -> unit effects(io, sys) {
+    let args = os_args()
+    let n_args = vec_len(args) as i64
+    if n_args < 2 {
+        print("usage: logbatch <file1> [file2 ...]")
+        return unit
+    }
+
+    let mut total_files: i64 = 0
+    let mut total_lines: i64 = 0
+    let mut total_parse_errors: i64 = 0
+
+    let mut idx: i64 = 1
+    loop {
+        if idx >= n_args { break }
+        let path = args[idx as u64]
+        let basename = path_basename(path)
+
+        let raw = read_log(path) must {
+            ok(s)  => s
+            err(e) => {
+                print(str_concat("error: cannot read file: ", e))
+                return unit
+            }
+        }
+
+        let lines = str_split(raw, "\n")
+        let stats = compute_stats(basename, lines)
+
+        let file_lines = stats.errors + stats.warns + stats.infos + stats.debugs + stats.parse_errors
+        total_files = total_files + 1
+        total_lines = total_lines + file_lines
+        total_parse_errors = total_parse_errors + stats.parse_errors
+
+        let summary = str_concat(stats.name, str_concat(": ERROR=", str_concat(int_to_str(stats.errors), str_concat(" WARN=", str_concat(int_to_str(stats.warns), str_concat(" INFO=", str_concat(int_to_str(stats.infos), str_concat(" DEBUG=", str_concat(int_to_str(stats.debugs), str_concat(" parse_errors=", int_to_str(stats.parse_errors)))))))))))
+        print(summary)
+
+        idx = idx + 1
+    }
+
+    let totals = str_concat("TOTAL: files=", str_concat(int_to_str(total_files), str_concat(" lines=", str_concat(int_to_str(total_lines), str_concat(" parse_errors=", int_to_str(total_parse_errors))))))
+    print(totals)
+
+    return unit
+}

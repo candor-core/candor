@@ -1,0 +1,59 @@
+[
+  {
+    "language": "candor",
+    "display": "Candor",
+    "model": "claude-sonnet-4-6",
+    "run_id": "20260421_234159",
+    "timestamp": "2026-04-21T23:41:59.759101",
+    "reference_tokens_est": 2263,
+    "rounds": [
+      {
+        "round": 1,
+        "input_tokens": 3614,
+        "output_tokens": 1536,
+        "compiles": false,
+        "correct": false,
+        "compile_stderr": "D:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_234159_r1.c: In function 'main':\nD:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_234159_r1.c:423:13: error: 'argc' redeclared as different kind of symbol\n  423 |     int64_t argc = ((int64_t)((args)._len));\n      |             ^~~~\nD:\\SWC\\CandorSWC\\benchmarks\\results\\candor_20260421_234159_r1.c:420:14: note: previous definition of 'argc' with type 'int'\n  420 | int main(int argc, char** argv) {\n      |          ~~~~^~~~\ncandorc: c compiler \"C:\\\\msys64v2026\\\\mingw64\\\\bin\\\\gcc.exe\" failed: exit status 1",
+        "actual_output": ""
+      },
+      {
+        "round": 2,
+        "input_tokens": 5416,
+        "output_tokens": 1456,
+        "compiles": true,
+        "correct": true,
+        "compile_stderr": "",
+        "actual_output": ""
+      }
+    ],
+    "total_input_tokens": 9030,
+    "total_output_tokens": 2992,
+    "total_tokens": 12022,
+    "final_compiles": true,
+    "final_correct": true
+  },
+  {
+    "language": "go",
+    "display": "Go",
+    "model": "claude-sonnet-4-6",
+    "run_id": "20260421_234159",
+    "timestamp": "2026-04-21T23:42:26.251218",
+    "reference_tokens_est": 0,
+    "rounds": [
+      {
+        "round": 1,
+        "input_tokens": 390,
+        "output_tokens": 982,
+        "compiles": true,
+        "correct": true,
+        "compile_stderr": "",
+        "actual_output": ""
+      }
+    ],
+    "total_input_tokens": 390,
+    "total_output_tokens": 982,
+    "total_tokens": 1372,
+    "final_compiles": true,
+    "final_correct": true
+  }
+]
