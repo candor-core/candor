@@ -117,7 +117,7 @@ def run_corpus_benchmark(model: str) -> dict:
             "lines_verification": vf_text.count("\n"),
             "lines_agent": af_text.count("\n"),
         }
-        print(f" {vf_tok} → {af_tok} tok  ({pct}% savings)")
+        print(f" {vf_tok} -> {af_tok} tok  ({pct}% savings)")
 
     if savings_pcts:
         m, s = mean_std(savings_pcts)
@@ -149,8 +149,8 @@ def print_report(results: dict):
     if "summary" in results:
         s = results["summary"]
         print(f"\nSummary across {s['n_files']} programs:")
-        print(f"  Mean savings:  {s['mean_savings_pct']:.1f}% ± {s['std_savings_pct']:.1f}%")
-        print(f"  Range:         {s['min_savings_pct']:.1f}% – {s['max_savings_pct']:.1f}%")
+        print(f"  Mean savings:  {s['mean_savings_pct']:.1f}% +/- {s['std_savings_pct']:.1f}%")
+        print(f"  Range:         {s['min_savings_pct']:.1f}% - {s['max_savings_pct']:.1f}%")
         print()
         print("Interpretation:")
         print(f"  An AI writing these programs in Agent Form consumes on average")

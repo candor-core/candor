@@ -1,0 +1,46 @@
+{
+  "timestamp": "2026-04-25T06:42:02.193300+00:00",
+  "model": "claude-sonnet-4-6",
+  "baseline_overhead": 8,
+  "files": {
+    "log_filter": {
+      "verification_tokens": 1159,
+      "agent_tokens": 877,
+      "tokens_saved": 282,
+      "savings_pct": 24.3,
+      "lines_verification": 103,
+      "lines_agent": 88
+    },
+    "word_stats": {
+      "verification_tokens": 924,
+      "agent_tokens": 618,
+      "tokens_saved": 306,
+      "savings_pct": 33.1,
+      "lines_verification": 91,
+      "lines_agent": 72
+    },
+    "config": {
+      "verification_tokens": 974,
+      "agent_tokens": 788,
+      "tokens_saved": 186,
+      "savings_pct": 19.1,
+      "lines_verification": 88,
+      "lines_agent": 78
+    },
+    "pipeline": {
+      "verification_tokens": 1525,
+      "agent_tokens": 1226,
+      "tokens_saved": 299,
+      "savings_pct": 19.6,
+      "lines_verification": 134,
+      "lines_agent": 117
+    }
+  },
+  "summary": {
+    "n_files": 4,
+    "mean_savings_pct": 24.0,
+    "std_savings_pct": 6.5,
+    "min_savings_pct": 19.1,
+    "max_savings_pct": 33.1
+  }
+}

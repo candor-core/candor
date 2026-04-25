@@ -135,20 +135,51 @@ At scale: 100 concurrent requests on a 70B model (327 KB KV cache per token),
 
 ---
 
-## What Is Not Yet Measured
+## Whole-Program Corpus Measurements
 
-Current data is constructed examples, not a corpus. The next validation step:
+*Added 2026-04-25. Tool: `benchmarks/tokenizer/corpus_benchmark.py`*
 
-1. Measure whole `examples/*.cnd` program files in both forms
-2. Report mean ± std across N programs (defensible confidence interval)
-3. Cross-language comparison: same programs in Python, Rust, Go
+Four real Candor programs measured in both forms. Verification Form is the current
+compilable source. Agent Form uses `->?T io` signature shorthands; bodies unchanged
+except where `?` applies (see note below).
 
-The current numbers are a lower bound — they represent the most common patterns
-but do not capture compounding effects across a full program.
+| Program | Verification Form | Agent Form | Savings |
+|---|---|---|---|
+| log_filter | 1159 tok | 877 tok | **24.3%** |
+| word_stats | 924 tok | 618 tok | **33.1%** |
+| config | 974 tok | 788 tok | **19.1%** |
+| pipeline | 1525 tok | 1226 tok | **19.6%** |
+
+**Corpus mean: 24.0% ± 6.5%** (N=4, claude-sonnet-4-6, 2026-04-25)
+
+### Why the corpus number differs from the function-level 60%
+
+The function-level benchmark measures programs where errors are propagated
+unchanged — `?` replaces the full match block, giving 80%+ savings per site.
+
+In these real programs, most `must{}` blocks *add context* to errors
+(`"cannot read: " + path`). Those cannot become `?`. The Agent Form savings
+here come from signature shorthand only.
+
+**The two numbers measure different things:**
+- **24% ± 6.5%** — whole real programs, signature shorthand only
+- **60%** — functions with direct error propagation chains (constructed example)
+- **80–83% per site** — individual `?` operator vs full match syntax
+
+Both numbers are correct and honest. The corpus number is the conservative floor
+for mixed real-world programs. The function-level number applies when the code
+pattern allows direct propagation. The right number depends on what you're building.
+
+### What is not yet measured
+
+- Cross-language comparison: same programs in Python, Rust, Go
+- Larger corpus (10+ programs)
+- Programs with heavier `?` usage (when error-transform cases are eliminated by
+  better library design)
 
 ---
 
-*Tool: `benchmarks/tokenizer/token_analysis.py`*
+*Tool: `benchmarks/tokenizer/token_analysis.py` (constructs) and `corpus_benchmark.py` (whole files)*
 *Model: claude-sonnet-4-6 — re-run when models update*
 *Data: `benchmarks/tokenizer/results/`*
 *Candor source: https://github.com/candor-core/candor*
