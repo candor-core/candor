@@ -5,16 +5,17 @@
 
 ---
 
-## Where We Are Today (2026-03-28)
+## Where We Are Today (2026-04-24)
 
 The Candor compiler is a **production-quality single-pass compiler** written in Go. It has two
 code-generation backends (C and LLVM IR) and a full language surface including generics, closures,
 traits, effects, contracts, pattern matching, and a standard library.
 
-The **Stage 1 bootstrap pipeline is complete**: the lexer, parser, type-checker, and C emitter
-are all written in Candor (`src/compiler/`). `candorc build src/compiler/Candor.toml` produces
-`candorc-stage1`, a working binary compiled from Candor source. All Go tests pass (`go test ./...`).
-The next goal is Stage 2: `candorc-stage1` compiling itself.
+**The compiler is fully self-hosting.** `stage4.c == stage2.c` (0 diff lines) — bootstrap
+idempotency is proven. The `?` propagation and `|>` pipeline operators are implemented (13/13 tests
+green). `pure` functions emit `memory(none) nounwind` in LLVM IR, independently verified by LLVM's
+own verifier. The immediate next goals are `result<T,E>` as a named LLVM struct (LLVM-2) and `?` as
+`extractvalue + br + ret` in IR (LLVM-3).
 
 ### Completed milestones
 
@@ -66,6 +67,8 @@ The next goal is Stage 2: `candorc-stage1` compiling itself.
 | **M12.1** | `candorc audit` — C audit report: emits `.c` + `.audit.md` (Markdown report of every Candor safety feature with no C equivalent — effects, pure, requires, ensures, must{}, secret<T>). AuditLog target-aware ("Candor → C Audit Report"). | 2026-04-10 |
 | **M12.2** | `candorc emit-go` — Go emitter: emits idiomatic `.go` (compilable, verified with `go run`) + `.audit.md` ("Candor → Go Audit Report"). Full type mapping, ok/err multi-return, must{} → if err != nil, result<T,E> match → if/else, requires → runtime panic. See `examples/safety_demo.cnd`. | 2026-04-13 |
 | **M7.6** | `candorc agent-json` — AI-native compiler diagnostics: always exits 0; emits JSON `{"status":"error","errors":[{"rule":"EFFECTS-001","file":"...","line":N,"col":N,"message":"...","context":"...","fix_hint":"..."}]}` or `{"status":"ok","output":"..."}`. Rule IDs: EFFECTS-001/002, TYPE-001/002, FLOW-001, NAMES-001/002, PARSE, COMPILER. `multiError.Unwrap() []error` added to typeck. Benchmark harness updated to use agent-json for Candor correction rounds (structured ~30-token errors replace ~1500-token full-stderr). | 2026-04-22 |
+| **M14** | `?` result propagation + `\|>` pipeline operators: both implemented and type-checked; 13/13 tests green. `?` saves 83% per propagation site vs full `match` syntax. Agent Form `-> ?str io` = 4 tokens vs Verification Form `-> result<str, str> effects(io)` = 11 tokens. | 2026-04-23 |
+| **LLVM-1** | `pure` → `memory(none) nounwind` in LLVM IR: implemented and tested. LLVM's own verifier independently rejects any `memory(none)` function that emits a load or store at the IR level. | 2026-04-23 |
 
 ### Known language gaps (not yet wired)
 - Named-return / early-exit in closures
@@ -76,16 +79,66 @@ The next goal is Stage 2: `candorc-stage1` compiling itself.
 
 ## Next Up
 
-### M14 — Core Ergonomics: `?` Propagation + `|>` Pipeline
+### LLVM-2 — `result<T,E>` as Named LLVM Struct
 
-> Goal: reduce the token cost and visual noise of error-handling and function chaining
+> Goal: replace the opaque `ptr` representation of `result<T,E>` with a typed LLVM struct.
+
+Currently `emit_llvm.go` ~line 194 maps every `result` type to `"ptr"`. Target representation:
+
+```llvm
+%result_str_str = type { i1, ptr, ptr }   ; { is_ok, ok_value, err_value }
+```
+
+- `i1` — discriminant (1 = ok, 0 = err)
+- Field 1 — ok payload (type T)
+- Field 2 — err payload (type E)
+
+All result construction (`ok(v)`, `err(e)`) emits `insertvalue` sequences. All `match`/`must`
+on result emits `extractvalue` + branch on discriminant. Required before LLVM-3.
+
+**Definition of done:**
+- `%result_T_E` struct types declared in LLVM IR header section
+- All result construction and matching uses `insertvalue` / `extractvalue`
+- All existing tests pass with LLVM backend
+
+---
+
+### LLVM-3 — `?` as `extractvalue + br + ret` in LLVM IR
+
+> Goal: implement `?` in `emit_llvm.go` as a structured branch. Blocked on LLVM-2.
+
+Currently `?` is only in `emit_c.go` — not yet wired in `emit_llvm.go`. Target pattern:
+
+```llvm
+%res   = call ...
+%is_ok = extractvalue %result_T_E %res, 0
+br i1 %is_ok, label %ok_bb, label %err_bb
+ok_bb:
+  %val = extractvalue %result_T_E %res, 1
+  ; continue
+err_bb:
+  %err = extractvalue %result_T_E %res, 2
+  ret %result_T2_E ...                     ; propagate wrapped error
+```
+
+**Definition of done:**
+- `?` in LLVM backend emits `extractvalue + br + ret` pattern
+- Enclosing function return type verified at emit time
+- All existing tests pass with LLVM backend
+
+---
+
+## M14 — `?` Propagation + `|>` Pipeline ✓ DONE
+
+> **Shipped 2026-04-23. 13/13 tests green.**
+
+> Original goal: reduce the token cost and visual noise of error-handling and function chaining
 > without sacrificing explicitness. These two features interact deeply and are designed
 > together. They apply at the Candor Core level (Verification Form) — not Agent Form only.
 
-**Motivation:** The most common Candor pattern is a chain of `pure` functions that can
-fail, with `effects(io)` at the boundary. Today each step requires a `must{}` block.
-With `?` and `|>`, the same chain is expressed in a fraction of the tokens while
-remaining explicit, typed, and compiler-enforced.
+**Summary:** The most common Candor pattern is a chain of `pure` functions that can
+fail, with `effects(io)` at the boundary. `?` and `|>` express the same chain in a
+fraction of the tokens while remaining explicit, typed, and compiler-enforced.
 
 #### M14.1 — `?` result propagation operator
 
@@ -1003,22 +1056,23 @@ Done  ──── v0.1   Core language, C backend, closures, effects, contracts
            M5.1   LLVM IR backend (feature-complete as of today)
            M5.2   Debug / release builds
            M5.3   Sanitizer integration
+           M5.5   WebAssembly target
+           M9.x   Full bootstrap — stage4.c == stage2.c (idempotency proven)
+           M14    ? propagation + |> pipeline
+           LLVM-1 pure → memory(none) nounwind in LLVM IR
 
-Near  ──── M13    Python → Candor → LLVM native extension target  ← new priority
-           M5.5   WebAssembly target  ✓ DONE
+Near  ──── LLVM-2  result<T,E> as named LLVM struct  ← immediate
+           LLVM-3  ? as extractvalue+br+ret in LLVM IR  ← immediate
+           M13    Python → Candor → LLVM native extension target
            M6.1   Symbolic contract evaluation (extend ComptimeValues)
            M8.2   C/C++ / CUDA header interop  ← reprioritized (Dynamo GPU FFI)
-           M10.4  arc<T>, pin<T>, weak<T> + inference stdlib  ← new priority
+           M10.4  arc<T>, pin<T>, weak<T> + inference stdlib
 
 Medium ─── M6.2   SMT integration (Z3 / CVC5)
            M6.3   Refinement types
-           M7.1   MCP tool annotations
-           M7.2   Semantic context embedding
-           M7.3   Effects as capability tokens (cap<gpu>, cap<net>, cap<mem>)
+           M7.5   Google ADK + A2A protocol support
            M8.1   Package registry
-           M10.1  task<T> / spawn structured concurrency
-           M10.3  Expanded hardware effects  ✓ DONE
-           M11.1  f16 / bf16 primitive types
+           M11.1  f16 / bf16 primitive types  ✓ DONE
            M11.2  tensor<T> builtin type
            M11.3  SIMD distance intrinsics (vec_dot, vec_l2, vec_cosine)
            M12.1  mmap<T> memory-mapped file allocation
@@ -1027,25 +1081,12 @@ Medium ─── M6.2   SMT integration (Z3 / CVC5)
 Far   ──── M6.4   forall / exists runtime + solver
            M7.4   export_json codegen
            M8.3   Doc generator
-           M9.1   vec::push / growable collections in LLVM  ✓ DONE
-           M9.2   box<T> recursive heap types  ✓ DONE
-           M9.3   Candor lexer in Candor  ✓ DONE
-           M9.4   Candor parser in Candor  ✓ DONE
-           M9.5   Type checker in Candor  ✓ DONE
-           M9.6   C code generator in Candor  ✓ DONE
-           M9.7   Stage 1 bootstrap  ✓ DONE  (go test ./... all green)
            M10.2  effects(async) — compiler state machine lowering
            M10.5  #[dynamo_endpoint] annotation + DGDR codegen
            M11.4  std/tensor.cnd — shape arithmetic, broadcast, reshape
            M11.5  std/vecdb.cnd — HNSW + IVF in pure Candor
            M12.2  std/colstore.cnd — columnar batch storage
            M12.4  std/kvcache.cnd — radix-tree KV cache (arc<T> + NIXL)
-
-Next  ──── M9.11  Multi-source entry point in stage1
-           M9.12  os_exec builtin (invoke C compiler from Candor)
-           M9.13  manifest.cnd — Candor.toml reader in Candor
-           M9.14  build subcommand in stage1 main.cnd
-Goal  ──── M9.15  Stage 2 self-hosting (stage1 compiles itself, diff proves consistency)
 ```
 
 ---
